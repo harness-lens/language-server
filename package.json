@@ -1,0 +1,42 @@
+{
+  "name": "@harness-lens/language-server",
+  "version": "0.0.1",
+  "description": "Language Server Protocol diagnostics for Harness Lens findings.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "harness-lens-language-server": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "LICENSE", "README.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public", "provenance": true },
+  "repository": { "type": "git", "url": "https://github.com/harness-lens/language-server.git" },
+  "homepage": "https://github.com/harness-lens/language-server#readme",
+  "bugs": { "url": "https://github.com/harness-lens/language-server/issues" },
+  "keywords": ["agents", "harness", "lsp", "diagnostics"],
+  "author": "Cristian Camargo Filho",
+  "license": "BSD-3-Clause",
+  "dependencies": {
+    "@harness-lens/core": "^0.0.1",
+    "vscode-languageserver": "^10.1.0",
+    "vscode-languageserver-textdocument": "^1.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
+  }
+}
