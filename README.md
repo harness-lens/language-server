@@ -1,3 +1,6 @@
+> SPDX-License-Identifier: MPL-2.0
+> Copyright © 2026 Cristian Camargo Filho
+
 # @harness-lens/language-server
 
 Language Server Protocol adapter for Harness Lens findings.
@@ -19,3 +22,11 @@ npm install
 npm test
 npm run check
 ```
+
+## License
+
+Early namespace-reservation versions used BSD-3-Clause. The official functional
+implementation is licensed under MPL-2.0. When Covered Software is distributed,
+modified MPL-covered files must remain available in Source Code Form under the
+license. See [LICENSING](LICENSING.md), [COPYRIGHT](COPYRIGHT), and
+[TRADEMARKS](TRADEMARKS).
