@@ -20,7 +20,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/harness-lens/core.git ../harness-lens-core
           npm --prefix ../harness-lens-core install
-          npm --prefix ../harness-lens-core pack --pack-destination "$GITHUB_WORKSPACE"
+          npm pack ../harness-lens-core --pack-destination "$GITHUB_WORKSPACE"
           npm install --no-save "$GITHUB_WORKSPACE/harness-lens-core-0.0.1.tgz"
       - run: npm test
       - run: npm run check
