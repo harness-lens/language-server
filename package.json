@@ -29,7 +29,7 @@
   "bugs": { "url": "https://github.com/harness-lens/language-server/issues" },
   "keywords": ["agents", "harness", "lsp", "diagnostics"],
   "author": "Cristian Camargo Filho",
-  "license": "BSD-3-Clause",
+  "license": "MPL-2.0",
   "dependencies": {
     "@harness-lens/core": "^0.0.1",
     "vscode-languageserver": "^10.1.0",
