@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MPL-2.0
+# Copyright © 2026 Cristian Camargo Filho
+
+[package]
+name = "harness-lens-lsp"
+description = "Language Server Protocol adapter for Harness Lens diagnostics"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Cristian Camargo Filho <ccf@cdone.com.br>"]
+license = "MPL-2.0"
+repository = "https://github.com/harness-lens/language-server"
+homepage = "https://github.com/harness-lens/language-server"
+readme = "README.md"
+keywords = ["harness", "lsp", "diagnostics", "agents"]
+publish = true
+
+[dependencies]
+harness-lens = { version = "0.0.1", git = "https://github.com/harness-lens/sdk.git", rev = "d31310754a7b791a4dedc0447eb3441d7219bd38" }
+tokio = { version = "1.47.1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+tower-lsp-server = "0.23.0"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
