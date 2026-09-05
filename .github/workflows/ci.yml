@@ -27,7 +27,9 @@ jobs:
       - run: npm pack --dry-run
 
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix: { os: [ubuntu-latest, windows-latest] }
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: rust
@@ -44,4 +46,4 @@ jobs:
         with: { node-version: "22" }
       - run: cargo build --locked
       - name: Verify native duplicate diagnostic lifecycle
-        run: node ../scripts/smoke-native-lsp.mjs target/debug/harness-lens-lsp
+        run: node ../scripts/smoke-native-lsp.mjs target/debug/harness-lens-lsp${{ runner.os == 'Windows' && '.exe' || '' }}

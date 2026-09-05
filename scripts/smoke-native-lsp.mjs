@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { once } from "node:events";
 
 assert.ok(process.argv[2], "Pass the native server executable path");
@@ -81,7 +81,8 @@ try {
   assert.equal(warning.severity, 2);
   assert.equal(warning.range.start.line, 1);
   assert.match(warning.message, /assumption:/);
-  assert.equal(warning.relatedInformation[0].location.uri, uri);
+  // Equivalent file URIs may encode the Windows drive colon differently.
+  assert.equal(fileURLToPath(warning.relatedInformation[0].location.uri), file);
   assert.equal(warning.relatedInformation[0].location.range.start.line, 0);
   console.log("HL032 warning: line 2, related line 1, normalization evidence present");
   send({ method: "textDocument/didChange", params: {
