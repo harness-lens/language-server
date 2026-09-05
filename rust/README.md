@@ -21,6 +21,11 @@ Editor-neutral Language Server Protocol adapter for Harness Lens. It scans the
 workspace with the Rust SDK, overlays unsaved open documents, and publishes
 standard diagnostics with stable Harness Lens rule codes.
 
+Clients may request `harnessLens/workspaceReport` for the same content-safe
+analysis report. Per-file source sizes, token estimates, configured cost,
+findings, and provenance remain available without moving analysis into editor
+code.
+
 Run over standard input/output:
 
 ```bash
