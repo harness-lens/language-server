@@ -3,6 +3,20 @@
 
 # harness-lens-lsp
 
+`HL032` flags exact duplicate lines/paragraphs in the native server. Warnings
+include normalization evidence and LSP related information linking to the
+earlier source location. Removing the duplicate clears the warning on edit.
+
+After `cargo build --locked`, verify the native protocol from this directory:
+
+```bash
+node ../scripts/smoke-native-lsp.mjs target/debug/harness-lens-lsp
+```
+
+On Windows, append `.exe` to the executable path. VS Code must point to this
+updated binary using `harnessLens.languageServer.path`; installing under
+`.harness-lens/bin` does not update an older binary under `.cargo/bin`.
+
 Editor-neutral Language Server Protocol adapter for Harness Lens. It scans the
 workspace with the Rust SDK, overlays unsaved open documents, and publishes
 standard diagnostics with stable Harness Lens rule codes.
