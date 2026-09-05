@@ -4,7 +4,7 @@
 // Usage: node scripts/smoke-native-lsp.mjs <native-server-executable>
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -82,7 +82,10 @@ try {
   assert.equal(warning.range.start.line, 1);
   assert.match(warning.message, /assumption:/);
   // Equivalent file URIs may encode the Windows drive colon differently.
-  assert.equal(fileURLToPath(warning.relatedInformation[0].location.uri), file);
+  assert.equal(
+    await realpath(fileURLToPath(warning.relatedInformation[0].location.uri)),
+    await realpath(file),
+  );
   assert.equal(warning.relatedInformation[0].location.range.start.line, 0);
   console.log("HL032 warning: line 2, related line 1, normalization evidence present");
   send({ id: 2, method: "harnessLens/workspaceReport", params: {
