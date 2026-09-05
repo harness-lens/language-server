@@ -354,6 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn redundancy_finding_highlights_the_full_instruction() {
+        let content =
+            "Try to avoid using branch names like codex.\nDo not use branches like codex.\n";
+        let second_line_start = content.find("Do not").unwrap();
+        let finding = Finding {
+            severity: Severity::Warning,
+            rule_id: "HL030".to_owned(),
+            message: "Instruction repeats earlier intent at AGENTS.md:1".to_owned(),
+            path: Some(PathBuf::from("AGENTS.md")),
+            line: Some(2),
+            span: Some(TextSpan {
+                start: second_line_start,
+                end: content.trim_end().len(),
+            }),
+            evidence: None,
+            source: "harness-lens.redundancy".to_owned(),
+        };
+
+        let diagnostic = diagnostic_from_finding(&finding, content).unwrap();
+
+        assert_eq!(
+            diagnostic.code,
+            Some(NumberOrString::String("HL030".to_owned()))
+        );
+        assert_eq!(
+            diagnostic.range,
+            Range::new(Position::new(1, 0), Position::new(1, 31))
+        );
+    }
+
+    #[test]
     fn deepest_workspace_root_wins() {
         let roots = [PathBuf::from("/repo"), PathBuf::from("/repo/nested")];
         assert_eq!(
