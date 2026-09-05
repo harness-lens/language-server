@@ -10,10 +10,11 @@ use harness_lens::{Finding, Scanner, Severity, TextSpan, is_harness_path, load_f
 use tokio::sync::RwLock;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, InitializeParams, InitializeResult,
-    InitializedParams, MessageType, NumberOrString, Position, PositionEncodingKind, Range,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, NumberOrString,
+    Position, PositionEncodingKind, Range, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
@@ -112,7 +113,12 @@ impl Backend {
                     .findings
                     .iter()
                     .filter(|finding| finding.path.as_deref() == Some(relative))
-                    .filter_map(|finding| diagnostic_from_finding(finding, content))
+                    .filter_map(|finding| {
+                        let mut diagnostic = diagnostic_from_finding(finding, content)?;
+                        diagnostic.related_information =
+                            related_information(finding, root, &documents_for_root);
+                        Some(diagnostic)
+                    })
                     .collect();
                 self.client
                     .publish_diagnostics(uri.clone(), diagnostics, None)
@@ -269,9 +275,54 @@ fn diagnostic_from_finding(finding: &Finding, content: &str) -> Option<Diagnosti
         }),
         code: Some(NumberOrString::String(finding.rule_id.clone())),
         source: Some(DIAGNOSTIC_SOURCE.to_owned()),
-        message: finding.message.clone(),
+        message: match finding.evidence.as_deref() {
+            Some(evidence) => format!("{}\n\nEvidence: {evidence}", finding.message),
+            None => finding.message.clone(),
+        },
         ..Diagnostic::default()
     })
+}
+
+fn related_information(
+    finding: &Finding,
+    root: &Path,
+    documents: &BTreeMap<PathBuf, String>,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    let locations = finding
+        .related
+        .iter()
+        .filter_map(|related| {
+            let path = root.join(&related.path);
+            let uri = Uri::from_file_path(&path)?;
+            // Unsaved editor content takes precedence over the on-disk source.
+            let content = documents
+                .get(&path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&path).ok());
+            let range = content
+                .as_deref()
+                .and_then(|content| {
+                    related
+                        .span
+                        .and_then(|span| range_from_byte_span(content, span))
+                        .or_else(|| related.line.map(|line| whole_line_range(content, line)))
+                })
+                .unwrap_or_else(|| {
+                    let position =
+                        Position::new(related.line.unwrap_or(1).saturating_sub(1) as u32, 0);
+                    Range::new(position, position)
+                });
+            Some(DiagnosticRelatedInformation {
+                location: Location::new(uri, range),
+                message: format!("Related instruction for {}", finding.rule_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    if locations.is_empty() {
+        None
+    } else {
+        Some(locations)
+    }
 }
 
 fn range_from_byte_span(content: &str, span: TextSpan) -> Option<Range> {
@@ -341,6 +392,7 @@ mod tests {
             span: Some(TextSpan { start: 4, end: 7 }),
             evidence: None,
             source: "harness-lens.repetition".to_owned(),
+            related: Vec::new(),
         };
 
         let diagnostic = diagnostic_from_finding(&finding, "Use use tests").unwrap();
@@ -370,6 +422,7 @@ mod tests {
             }),
             evidence: None,
             source: "harness-lens.redundancy".to_owned(),
+            related: Vec::new(),
         };
 
         let diagnostic = diagnostic_from_finding(&finding, content).unwrap();
@@ -390,6 +443,43 @@ mod tests {
         assert_eq!(
             root_for_path(Path::new("/repo/nested/AGENTS.md"), &roots),
             Some(Path::new("/repo/nested"))
+        );
+    }
+
+    #[test]
+    fn related_locations_use_unsaved_content_and_utf16_ranges() {
+        let root = std::env::current_dir().unwrap();
+        let path = PathBuf::from("nested/AGENTS.md");
+        let documents = BTreeMap::from([(root.join(&path), "😀 use tests\n".to_owned())]);
+        let finding = Finding {
+            severity: Severity::Warning,
+            rule_id: "HL032".to_owned(),
+            message: "Duplicate".to_owned(),
+            path: Some(PathBuf::from("AGENTS.md")),
+            line: Some(2),
+            span: None,
+            evidence: Some("assumption: normalize whitespace".to_owned()),
+            source: "harness-lens.exact-duplicates".to_owned(),
+            related: vec![harness_lens::FindingLocation {
+                path: path.clone(),
+                line: Some(1),
+                span: Some(TextSpan { start: 5, end: 8 }),
+            }],
+        };
+        let locations = related_information(&finding, &root, &documents).unwrap();
+        assert_eq!(
+            locations[0].location.uri,
+            Uri::from_file_path(root.join(path)).unwrap()
+        );
+        assert_eq!(
+            locations[0].location.range,
+            Range::new(Position::new(0, 3), Position::new(0, 6))
+        );
+        assert!(
+            diagnostic_from_finding(&finding, "first\nsecond")
+                .unwrap()
+                .message
+                .contains("assumption:")
         );
     }
 }
