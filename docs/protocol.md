@@ -20,6 +20,37 @@ Planned capabilities:
 - quick fixes and rule explanations;
 - snapshot and trend requests.
 
+## Workspace report request
+
+`harnessLens/workspaceReport` exposes the content-safe deterministic report
+already consumed by CLI and diagnostics. It never serializes source contents.
+
+Request parameters:
+
+```json
+{
+  "rootUri": "file:///workspace"
+}
+```
+
+`rootUri` is optional. When omitted, the response contains one report per
+initialized workspace root. Open editor documents overlay filesystem content
+without mutating history.
+
+Response envelope:
+
+```json
+{
+  "schemaVersion": 1,
+  "reports": []
+}
+```
+
+Each report retains Core's schema version, completeness reasons, content-free
+source records, findings, per-file and aggregate metrics, normalized scores,
+and observable plugin executions. Source spans remain UTF-8 byte ranges in the
+report; only diagnostic adapters convert positions to UTF-16.
+
 ## Diagnostic interoperability
 
 The Rust server under [`rust/`](../rust/) is the reference implementation. It

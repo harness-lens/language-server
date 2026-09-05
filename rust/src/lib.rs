@@ -6,9 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use harness_lens::{Finding, Scanner, Severity, TextSpan, is_harness_path, load_for_root};
+use harness_lens::{
+    AnalysisReport, Finding, Scanner, Severity, TextSpan, is_harness_path, load_for_root,
+};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::jsonrpc::{Error, Result};
 use tower_lsp_server::ls_types::{
     Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
@@ -19,6 +22,25 @@ use tower_lsp_server::ls_types::{
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 const DIAGNOSTIC_SOURCE: &str = "harness-lens";
+const WORKSPACE_REPORT_METHOD: &str = "harnessLens/workspaceReport";
+
+/// Parameters for a content-safe workspace report request.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceReportParams {
+    /// Optional initialized workspace root. When absent, all roots are scanned.
+    pub root_uri: Option<Uri>,
+}
+
+/// Versioned response carrying the same reports consumed by CLI and diagnostics.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceReports {
+    /// Protocol envelope version.
+    pub schema_version: u32,
+    /// One deterministic analysis report per requested workspace root.
+    pub reports: Vec<AnalysisReport>,
+}
 
 #[derive(Default)]
 struct State {
@@ -151,6 +173,24 @@ impl Backend {
             },
         );
     }
+
+    async fn workspace_report(&self, params: WorkspaceReportParams) -> Result<WorkspaceReports> {
+        let (roots, documents) = {
+            let state = self.state.read().await;
+            (state.roots.clone(), state.open_documents.clone())
+        };
+        let requested_root = params
+            .root_uri
+            .map(|uri| {
+                uri.to_file_path()
+                    .map(|path| path.into_owned())
+                    .ok_or_else(|| Error::invalid_params("rootUri must be a file URI"))
+            })
+            .transpose()?;
+
+        build_workspace_reports(&roots, &documents, requested_root.as_deref())
+            .map_err(Error::invalid_params)
+    }
 }
 
 impl LanguageServer for Backend {
@@ -252,8 +292,51 @@ fn legacy_root_uri(params: &InitializeParams) -> Option<Uri> {
 pub async fn serve() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(Backend::new);
+    let (service, socket) = LspService::build(Backend::new)
+        .custom_method(WORKSPACE_REPORT_METHOD, Backend::workspace_report)
+        .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+fn build_workspace_reports(
+    roots: &[PathBuf],
+    documents: &BTreeMap<PathBuf, OpenDocument>,
+    requested_root: Option<&Path>,
+) -> std::result::Result<WorkspaceReports, String> {
+    let requested_root =
+        requested_root.map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    if let Some(requested) = &requested_root {
+        if !roots.iter().any(|root| root == requested) {
+            return Err(format!(
+                "rootUri is not an initialized workspace root: {}",
+                requested.display()
+            ));
+        }
+    }
+
+    let mut reports = Vec::new();
+    for root in roots.iter().filter(|root| {
+        requested_root
+            .as_ref()
+            .is_none_or(|requested| *root == requested)
+    }) {
+        let config = load_for_root(root, None)
+            .map_err(|error| format!("cannot load Harness Lens config: {error}"))?;
+        let overrides = documents
+            .iter()
+            .filter(|(path, _)| root_for_path(path, roots) == Some(root.as_path()))
+            .map(|(path, document)| (path.clone(), document.text.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let report = Scanner::new()
+            .scan_with_overrides(root, &config, &overrides)
+            .map_err(|error| format!("cannot scan workspace: {error}"))?;
+        reports.push(report);
+    }
+
+    Ok(WorkspaceReports {
+        schema_version: 1,
+        reports,
+    })
 }
 
 fn diagnostic_from_finding(finding: &Finding, content: &str) -> Option<Diagnostic> {
@@ -391,6 +474,69 @@ fn root_for_path<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_workspace(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "harness-lens-lsp-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create temporary workspace");
+        root
+    }
+
+    #[test]
+    fn workspace_report_exposes_per_file_metrics_without_source_content() {
+        let root = temporary_workspace("report");
+        let secret = "Never serialize SECRET_SENTINEL source content.\n";
+        std::fs::write(root.join("AGENTS.md"), secret).expect("write harness source");
+        let root = root.canonicalize().expect("canonical workspace");
+
+        let response =
+            build_workspace_reports(std::slice::from_ref(&root), &BTreeMap::new(), Some(&root))
+                .expect("workspace report");
+
+        assert_eq!(response.schema_version, 1);
+        assert_eq!(response.reports.len(), 1);
+        let report = &response.reports[0];
+        assert!(
+            report
+                .sources
+                .iter()
+                .any(|source| source.path == Path::new("AGENTS.md"))
+        );
+        assert!(report.metrics.iter().any(|metric| {
+            metric.path.as_deref() == Some(Path::new("AGENTS.md"))
+                && metric.name == "harness.source.estimated_tokens"
+        }));
+        let serialized = serde_json::to_string(&response).expect("serialize response");
+        assert!(!serialized.contains("SECRET_SENTINEL"));
+
+        std::fs::remove_dir_all(root).expect("remove temporary workspace");
+    }
+
+    #[test]
+    fn workspace_report_rejects_uninitialized_root() {
+        let root = temporary_workspace("known");
+        let other = temporary_workspace("unknown");
+        let result = build_workspace_reports(
+            std::slice::from_ref(&root),
+            &BTreeMap::new(),
+            Some(other.as_path()),
+        );
+
+        assert!(
+            result
+                .unwrap_err()
+                .contains("not an initialized workspace root")
+        );
+        std::fs::remove_dir_all(root).expect("remove known workspace");
+        std::fs::remove_dir_all(other).expect("remove unknown workspace");
+    }
 
     #[test]
     fn byte_spans_convert_to_utf16_positions() {

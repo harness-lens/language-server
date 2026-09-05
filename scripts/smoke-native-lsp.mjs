@@ -85,14 +85,26 @@ try {
   assert.equal(fileURLToPath(warning.relatedInformation[0].location.uri), file);
   assert.equal(warning.relatedInformation[0].location.range.start.line, 0);
   console.log("HL032 warning: line 2, related line 1, normalization evidence present");
+  send({ id: 2, method: "harnessLens/workspaceReport", params: {
+    rootUri: pathToFileURL(root).href,
+  } });
+  const workspaceReport = await receive(message => message.id === 2);
+  assert.equal(workspaceReport.result.schemaVersion, 1);
+  assert.equal(workspaceReport.result.reports.length, 1);
+  const report = workspaceReport.result.reports[0];
+  assert.ok(report.sources.some(source => source.path === "AGENTS.md"));
+  assert.ok(report.metrics.some(metric =>
+    metric.path === "AGENTS.md" && metric.name === "harness.source.estimated_tokens"));
+  assert.ok(!JSON.stringify(workspaceReport.result).includes(line));
+  console.log("Workspace report: per-file metrics present, source content absent");
   send({ method: "textDocument/didChange", params: {
     textDocument: { uri, version: 2 }, contentChanges: [{ text: `${line}\n` }],
   } });
   const cleared = await receive(diagnosticMessage);
   assert.ok(!cleared.params.diagnostics.some(diagnostic => diagnostic.code === "HL032"));
   console.log("HL032 cleared after removing the duplicate in the unsaved editor buffer");
-  send({ id: 2, method: "shutdown", params: null });
-  await receive(message => message.id === 2);
+  send({ id: 3, method: "shutdown", params: null });
+  await receive(message => message.id === 3);
   send({ method: "exit" });
 } finally {
   if (child.exitCode === null && child.pid) {

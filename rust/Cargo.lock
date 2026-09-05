@@ -172,6 +172,8 @@ name = "harness-lens-lsp"
 version = "0.0.1"
 dependencies = [
  "harness-lens",
+ "serde",
+ "serde_json",
  "tokio",
  "tower-lsp-server",
 ]
