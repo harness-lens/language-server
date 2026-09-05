@@ -293,7 +293,7 @@ fn related_information(
         .iter()
         .filter_map(|related| {
             let path = root.join(&related.path);
-            let uri = Uri::from_file_path(&path)?;
+            let uri = file_uri(&path)?;
             // Unsaved editor content takes precedence over the on-disk source.
             let content = documents
                 .get(&path)
@@ -323,6 +323,25 @@ fn related_information(
     } else {
         Some(locations)
     }
+}
+
+fn file_uri(path: &Path) -> Option<Uri> {
+    // canonicalize() returns extended-length paths on Windows, which must not
+    // leak into LSP file URIs as encoded "?/" segments.
+    #[cfg(windows)]
+    let normalized = {
+        let text = path.to_str()?;
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{rest}"))
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            PathBuf::from(rest)
+        } else {
+            path.to_path_buf()
+        }
+    };
+    #[cfg(windows)]
+    let path = normalized.as_path();
+    Uri::from_file_path(path)
 }
 
 fn range_from_byte_span(content: &str, span: TextSpan) -> Option<Range> {
@@ -480,6 +499,19 @@ mod tests {
                 .unwrap()
                 .message
                 .contains("assumption:")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_extended_paths_produce_standard_file_uris() {
+        assert_eq!(
+            file_uri(Path::new(r"\\?\C:\repo\AGENTS.md")),
+            Uri::from_file_path(r"C:\repo\AGENTS.md")
+        );
+        assert_eq!(
+            file_uri(Path::new(r"\\?\UNC\server\share\AGENTS.md")),
+            Uri::from_file_path(r"\\server\share\AGENTS.md")
         );
     }
 }
