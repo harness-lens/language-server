@@ -3,26 +3,40 @@
 
 #![doc = include_str!("../README.md")]
 
+mod runtime_metrics;
+
+pub use runtime_metrics::{RuntimeIssue, RuntimeMode, RuntimeState, RuntimeStatus};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use harness_lens::{
     AnalysisReport, Finding, Scanner, Severity, TextSpan, is_harness_path, load_for_root,
 };
+use harness_metrics::{
+    CodeBurnSnapshot, DocumentInsight, InsightSeverity, InsightSpan, analyze_document_for_project,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_lsp_server::jsonrpc::{Error, Result};
 use tower_lsp_server::ls_types::{
-    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, NumberOrString,
-    Position, PositionEncodingKind, Range, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CodeLens, CodeLensOptions, CodeLensParams, Command, Diagnostic, DiagnosticRelatedInformation,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, ExecuteCommandOptions,
+    ExecuteCommandParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind,
+    MessageType, NumberOrString, Position, PositionEncodingKind, Range, ServerCapabilities,
+    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
 const DIAGNOSTIC_SOURCE: &str = "harness-lens";
+const METRICS_SOURCE: &str = "harness-metrics";
+const REFRESH_RUNTIME_COMMAND: &str = "harnessMetrics.refreshCodeBurn";
+const SHOW_INSIGHT_COMMAND: &str = "harnessMetrics.showInsight";
 const WORKSPACE_REPORT_METHOD: &str = "harnessLens/workspaceReport";
+const DEFAULT_MAX_FILES: usize = 5_000;
+const ABSOLUTE_MAX_FILES: usize = 50_000;
 
 /// Parameters for a content-safe workspace report request.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -30,6 +44,8 @@ const WORKSPACE_REPORT_METHOD: &str = "harnessLens/workspaceReport";
 pub struct WorkspaceReportParams {
     /// Optional initialized workspace root. When absent, all roots are scanned.
     pub root_uri: Option<Uri>,
+    /// Maximum discovered files per root. Defaults to 5,000 and cannot exceed 50,000.
+    pub max_files: Option<usize>,
 }
 
 /// Versioned response carrying the same reports consumed by CLI and diagnostics.
@@ -40,12 +56,16 @@ pub struct WorkspaceReports {
     pub schema_version: u32,
     /// One deterministic analysis report per requested workspace root.
     pub reports: Vec<AnalysisReport>,
+    /// Optional aggregate runtime status. Runtime data never changes these reports.
+    pub runtime: RuntimeStatus,
 }
 
 #[derive(Default)]
 struct State {
     roots: Vec<PathBuf>,
     open_documents: BTreeMap<PathBuf, OpenDocument>,
+    runtime_snapshot: Option<CodeBurnSnapshot>,
+    runtime_status: runtime_metrics::RuntimeStatus,
 }
 
 #[derive(Clone)]
@@ -58,20 +78,86 @@ struct OpenDocument {
 pub struct Backend {
     client: Client,
     state: RwLock<State>,
+    runtime_config: runtime_metrics::RuntimeConfig,
 }
 
 impl Backend {
     fn new(client: Client) -> Self {
+        let runtime_config = runtime_metrics::RuntimeConfig::from_env();
+        let runtime_status = runtime_config.initial_status();
         Self {
             client,
-            state: RwLock::new(State::default()),
+            state: RwLock::new(State {
+                runtime_status,
+                ..State::default()
+            }),
+            runtime_config,
+        }
+    }
+
+    async fn refresh_runtime(&self) {
+        if self.runtime_config.mode == runtime_metrics::RuntimeMode::Off {
+            return;
+        }
+        if let Some(issue) = self.runtime_config.issue {
+            let mut state = self.state.write().await;
+            state.runtime_status.state = runtime_metrics::RuntimeState::Invalid;
+            state.runtime_status.issue = Some(issue);
+            return;
+        }
+        {
+            let mut state = self.state.write().await;
+            state.runtime_status.state = runtime_metrics::RuntimeState::Loading;
+            state.runtime_status.issue = None;
+        }
+        match runtime_metrics::load(&self.runtime_config).await {
+            Ok(snapshot) => {
+                let status = runtime_metrics::RuntimeStatus {
+                    mode: self.runtime_config.mode,
+                    state: runtime_metrics::RuntimeState::Ready,
+                    issue: None,
+                    period: self.runtime_config.period.clone(),
+                    calls: snapshot.report.overview.calls,
+                    sessions: snapshot.report.overview.sessions,
+                    warning_count: snapshot.warnings.len(),
+                    has_snapshot: true,
+                };
+                let mut state = self.state.write().await;
+                state.runtime_snapshot = Some(snapshot);
+                state.runtime_status = status;
+                drop(state);
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        "Harness Metrics runtime snapshot refreshed",
+                    )
+                    .await;
+                let _ = self.client.code_lens_refresh().await;
+            }
+            Err(issue) => {
+                let mut state = self.state.write().await;
+                state.runtime_status.state = runtime_metrics::RuntimeState::Failed;
+                state.runtime_status.issue = Some(issue);
+                state.runtime_status.has_snapshot = state.runtime_snapshot.is_some();
+                drop(state);
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Harness Metrics: {}", issue.message()),
+                    )
+                    .await;
+            }
         }
     }
 
     async fn analyze_open_documents(&self) {
-        let (roots, documents) = {
+        let (roots, documents, runtime_snapshot) = {
             let state = self.state.read().await;
-            (state.roots.clone(), state.open_documents.clone())
+            (
+                state.roots.clone(),
+                state.open_documents.clone(),
+                state.runtime_snapshot.clone(),
+            )
         };
         let mut published = BTreeSet::new();
 
@@ -131,7 +217,7 @@ impl Backend {
                 let Some(uri) = documents.get(path).map(|document| document.uri.clone()) else {
                     continue;
                 };
-                let diagnostics = report
+                let mut diagnostics = report
                     .findings
                     .iter()
                     .filter(|finding| finding.path.as_deref() == Some(relative))
@@ -141,7 +227,10 @@ impl Backend {
                             related_information(finding, root, &documents_for_root);
                         Some(diagnostic)
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                if let Some(snapshot) = &runtime_snapshot {
+                    diagnostics.extend(metrics_diagnostics(root, relative, content, snapshot));
+                }
                 self.client
                     .publish_diagnostics(uri.clone(), diagnostics, None)
                     .await;
@@ -153,8 +242,21 @@ impl Backend {
             if published.contains(&path) {
                 continue;
             }
+            let diagnostics = runtime_snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    let root = root_for_path(&path, &roots)?;
+                    let relative = path.strip_prefix(root).ok()?;
+                    Some(metrics_diagnostics(
+                        root,
+                        relative,
+                        &document.text,
+                        snapshot,
+                    ))
+                })
+                .unwrap_or_default();
             self.client
-                .publish_diagnostics(document.uri, Vec::new(), None)
+                .publish_diagnostics(document.uri, diagnostics, None)
                 .await;
         }
     }
@@ -175,10 +277,20 @@ impl Backend {
     }
 
     async fn workspace_report(&self, params: WorkspaceReportParams) -> Result<WorkspaceReports> {
-        let (roots, documents) = {
+        let (roots, documents, runtime_status) = {
             let state = self.state.read().await;
-            (state.roots.clone(), state.open_documents.clone())
+            (
+                state.roots.clone(),
+                state.open_documents.clone(),
+                state.runtime_status.clone(),
+            )
         };
+        let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
+        if max_files == 0 || max_files > ABSOLUTE_MAX_FILES {
+            return Err(Error::invalid_params(
+                "maxFiles must be between 1 and 50000",
+            ));
+        }
         let requested_root = params
             .root_uri
             .map(|uri| {
@@ -188,8 +300,28 @@ impl Backend {
             })
             .transpose()?;
 
-        build_workspace_reports(&roots, &documents, requested_root.as_deref())
-            .map_err(Error::invalid_params)
+        build_workspace_reports(
+            &roots,
+            &documents,
+            requested_root.as_deref(),
+            max_files,
+            runtime_status,
+        )
+        .map_err(Error::invalid_params)
+    }
+
+    async fn metrics_document(
+        &self,
+        uri: &Uri,
+    ) -> Option<(PathBuf, OpenDocument, Option<CodeBurnSnapshot>, PathBuf)> {
+        let path = uri.to_file_path()?.into_owned();
+        let path = path.canonicalize().unwrap_or(path);
+        let state = self.state.read().await;
+        let document = state.open_documents.get(&path)?.clone();
+        let snapshot = state.runtime_snapshot.clone();
+        let root = root_for_path(&path, &state.roots)?;
+        let relative = path.strip_prefix(root).ok()?.to_owned();
+        Some((root.to_owned(), document, snapshot, relative))
     }
 }
 
@@ -229,6 +361,17 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![
+                        REFRESH_RUNTIME_COMMAND.to_owned(),
+                        SHOW_INSIGHT_COMMAND.to_owned(),
+                    ],
+                    ..ExecuteCommandOptions::default()
+                }),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -243,6 +386,8 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "Harness Lens language server ready")
             .await;
+        self.refresh_runtime().await;
+        self.analyze_open_documents().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -281,6 +426,77 @@ impl LanguageServer for Backend {
             .await;
         self.analyze_open_documents().await;
     }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let Some((root, document, snapshot, relative)) = self.metrics_document(&uri).await else {
+            return Ok(None);
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        if !runtime_metrics::is_metrics_path(&relative) {
+            return Ok(None);
+        }
+        let Some(byte) = byte_at_position(&document.text, position) else {
+            return Ok(None);
+        };
+        let insights =
+            analyze_document_for_project(&relative, &document.text, &snapshot, Some(&root));
+        let Some(insight) = insights.iter().find(|insight| {
+            insight
+                .span
+                .is_some_and(|span| span.start <= byte && byte < span.end)
+        }) else {
+            return Ok(None);
+        };
+        let range = insight
+            .span
+            .and_then(|span| range_from_insight_span(&document.text, span));
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!(
+                    "### {}\n\n{}\n\n_Source: CodeBurn via Harness Metrics · Method: {}_",
+                    insight.title, insight.detail, insight.method
+                ),
+            }),
+            range,
+        }))
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let Some((root, document, snapshot, relative)) =
+            self.metrics_document(&params.text_document.uri).await
+        else {
+            return Ok(None);
+        };
+        if !runtime_metrics::is_metrics_path(&relative) {
+            return Ok(None);
+        }
+        Ok(Some(metrics_code_lenses(
+            &root,
+            &relative,
+            &document.text,
+            snapshot.as_ref(),
+        )))
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<tower_lsp_server::ls_types::LSPAny>> {
+        match params.command.as_str() {
+            REFRESH_RUNTIME_COMMAND => {
+                self.refresh_runtime().await;
+                self.analyze_open_documents().await;
+                Ok(None)
+            }
+            SHOW_INSIGHT_COMMAND => Ok(None),
+            _ => Err(Error::invalid_request()),
+        }
+    }
 }
 
 #[allow(deprecated)]
@@ -302,6 +518,8 @@ fn build_workspace_reports(
     roots: &[PathBuf],
     documents: &BTreeMap<PathBuf, OpenDocument>,
     requested_root: Option<&Path>,
+    max_files: usize,
+    runtime: runtime_metrics::RuntimeStatus,
 ) -> std::result::Result<WorkspaceReports, String> {
     let requested_root =
         requested_root.map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
@@ -320,8 +538,9 @@ fn build_workspace_reports(
             .as_ref()
             .is_none_or(|requested| *root == requested)
     }) {
-        let config = load_for_root(root, None)
+        let mut config = load_for_root(root, None)
             .map_err(|error| format!("cannot load Harness Lens config: {error}"))?;
+        config.discovery.max_files = config.discovery.max_files.min(max_files);
         let overrides = documents
             .iter()
             .filter(|(path, _)| root_for_path(path, roots) == Some(root.as_path()))
@@ -336,6 +555,7 @@ fn build_workspace_reports(
     Ok(WorkspaceReports {
         schema_version: 1,
         reports,
+        runtime,
     })
 }
 
@@ -364,6 +584,77 @@ fn diagnostic_from_finding(finding: &Finding, content: &str) -> Option<Diagnosti
         },
         ..Diagnostic::default()
     })
+}
+
+fn metrics_diagnostics(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    snapshot: &CodeBurnSnapshot,
+) -> Vec<Diagnostic> {
+    if !runtime_metrics::is_metrics_path(path) {
+        return Vec::new();
+    }
+    analyze_document_for_project(path, content, snapshot, Some(root))
+        .into_iter()
+        .filter(|insight| insight.severity == InsightSeverity::Warning)
+        .map(|insight| Diagnostic {
+            range: insight
+                .span
+                .and_then(|span| range_from_insight_span(content, span))
+                .unwrap_or_default(),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String(insight.code)),
+            source: Some(METRICS_SOURCE.to_owned()),
+            message: format!(
+                "{}: {} (method: {})",
+                insight.title, insight.detail, insight.method
+            ),
+            ..Diagnostic::default()
+        })
+        .collect()
+}
+
+fn code_lens_from_insight(insight: DocumentInsight) -> CodeLens {
+    CodeLens {
+        range: Range::default(),
+        command: Some(Command {
+            title: format!(
+                "[{}] {} — {}",
+                insight.method, insight.title, insight.detail
+            ),
+            command: SHOW_INSIGHT_COMMAND.to_owned(),
+            arguments: None,
+        }),
+        data: None,
+    }
+}
+
+fn metrics_code_lenses(
+    root: &Path,
+    path: &Path,
+    content: &str,
+    snapshot: Option<&CodeBurnSnapshot>,
+) -> Vec<CodeLens> {
+    let mut lenses = snapshot
+        .map(|snapshot| {
+            analyze_document_for_project(path, content, snapshot, Some(root))
+                .into_iter()
+                .filter(|insight| insight.span.is_none() || insight.code == "HM200")
+                .map(code_lens_from_insight)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    lenses.push(CodeLens {
+        range: Range::default(),
+        command: Some(Command {
+            title: "Refresh Harness Metrics runtime snapshot".to_owned(),
+            command: REFRESH_RUNTIME_COMMAND.to_owned(),
+            arguments: None,
+        }),
+        data: None,
+    });
+    lenses
 }
 
 fn related_information(
@@ -441,6 +732,16 @@ fn range_from_byte_span(content: &str, span: TextSpan) -> Option<Range> {
     ))
 }
 
+fn range_from_insight_span(content: &str, span: InsightSpan) -> Option<Range> {
+    range_from_byte_span(
+        content,
+        TextSpan {
+            start: span.start,
+            end: span.end,
+        },
+    )
+}
+
 fn whole_line_range(content: &str, one_based_line: usize) -> Range {
     let target = one_based_line.saturating_sub(1);
     let line = content.lines().nth(target).unwrap_or("");
@@ -457,6 +758,32 @@ fn position_at_byte(content: &str, byte: usize) -> Position {
         prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
         utf16_len(&content[line_start..byte]),
     )
+}
+
+fn byte_at_position(content: &str, position: Position) -> Option<usize> {
+    let line_start = if position.line == 0 {
+        0
+    } else {
+        content
+            .match_indices('\n')
+            .nth(position.line.saturating_sub(1) as usize)?
+            .0
+            + 1
+    };
+    let line_end = content[line_start..]
+        .find('\n')
+        .map_or(content.len(), |offset| line_start + offset);
+    let mut utf16 = 0_u32;
+    for (offset, character) in content[line_start..line_end].char_indices() {
+        if utf16 == position.character {
+            return Some(line_start + offset);
+        }
+        utf16 += character.len_utf16() as u32;
+        if utf16 > position.character {
+            return None;
+        }
+    }
+    (utf16 == position.character).then_some(line_end)
 }
 
 fn utf16_len(text: &str) -> u32 {
@@ -496,9 +823,14 @@ mod tests {
         std::fs::write(root.join("AGENTS.md"), secret).expect("write harness source");
         let root = root.canonicalize().expect("canonical workspace");
 
-        let response =
-            build_workspace_reports(std::slice::from_ref(&root), &BTreeMap::new(), Some(&root))
-                .expect("workspace report");
+        let response = build_workspace_reports(
+            std::slice::from_ref(&root),
+            &BTreeMap::new(),
+            Some(&root),
+            DEFAULT_MAX_FILES,
+            runtime_metrics::RuntimeStatus::default(),
+        )
+        .expect("workspace report");
 
         assert_eq!(response.schema_version, 1);
         assert_eq!(response.reports.len(), 1);
@@ -527,6 +859,8 @@ mod tests {
             std::slice::from_ref(&root),
             &BTreeMap::new(),
             Some(other.as_path()),
+            DEFAULT_MAX_FILES,
+            runtime_metrics::RuntimeStatus::default(),
         );
 
         assert!(
@@ -536,6 +870,44 @@ mod tests {
         );
         std::fs::remove_dir_all(root).expect("remove known workspace");
         std::fs::remove_dir_all(other).expect("remove unknown workspace");
+    }
+
+    #[test]
+    fn workspace_report_applies_file_bound_and_exposes_runtime_status() {
+        let root = temporary_workspace("bounded");
+        std::fs::write(root.join("AGENTS.md"), "first").expect("write first source");
+        std::fs::write(root.join("CLAUDE.md"), "second").expect("write second source");
+        let root = root.canonicalize().expect("canonical workspace");
+        let runtime = RuntimeStatus {
+            mode: RuntimeMode::Snapshot,
+            state: RuntimeState::Ready,
+            period: "30days".to_owned(),
+            calls: 12,
+            sessions: 3,
+            has_snapshot: true,
+            ..RuntimeStatus::default()
+        };
+
+        let response = build_workspace_reports(
+            std::slice::from_ref(&root),
+            &BTreeMap::new(),
+            Some(&root),
+            1,
+            runtime,
+        )
+        .expect("bounded workspace report");
+
+        assert_eq!(response.reports[0].sources.len(), 1);
+        assert!(!response.reports[0].completeness.complete);
+        assert_eq!(
+            response.reports[0].completeness.reasons[0].code,
+            "file-count-limit"
+        );
+        let serialized = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(serialized["runtime"]["mode"], "snapshot");
+        assert_eq!(serialized["runtime"]["calls"], 12);
+
+        std::fs::remove_dir_all(root).expect("remove bounded workspace");
     }
 
     #[test]

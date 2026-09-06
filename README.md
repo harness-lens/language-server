@@ -13,11 +13,19 @@ npx @harness-lens/language-server --stdio
 
 The Rust server discovers the workspace hierarchy, overlays unsaved open harness
 documents, evaluates cross-file findings, and publishes evidence-backed warnings
-and errors with stable `HLxxx` codes and precise UTF-16 ranges. Because these are
-standard LSP diagnostics, extensions such as Error Lens can render them inline
-without an Error Lens dependency.
+and errors with stable `HLxxx` codes and precise UTF-16 ranges. Optional CodeBurn
+aggregates add `HMxxx` diagnostics, hover, and code lenses through Harness
+Metrics. Standard clients render these without a private editor protocol.
 
 Editors remain adapters: validation stays in `@harness-lens/core`. AI interpretation is not part of diagnostics or deterministic scoring.
+
+Runtime mode defaults to `off`; no capture process starts. Set
+`HARNESS_METRICS_MODE=live` for bounded CodeBurn aggregate capture, or
+`HARNESS_METRICS_MODE=snapshot` with `HARNESS_METRICS_SNAPSHOT_PATH` to read a
+canonical aggregate snapshot without process launch. Live mode accepts
+`HARNESS_METRICS_CODEBURN_EXECUTABLE` and `HARNESS_METRICS_CODEBURN_PERIOD`
+(default `30days`). Failures expose stable classes only, retain a previous valid
+snapshot, and never persist raw stderr.
 
 Bootstrap order: publish `@harness-lens/core@0.0.1` before this package.
 
