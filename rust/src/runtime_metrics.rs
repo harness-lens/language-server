@@ -48,6 +48,12 @@ pub enum RuntimeState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeIssue {
+    /// Optional provider selection contained an unknown local ID.
+    InvalidProvider,
+    /// Provider initialization options could not be parsed safely.
+    InvalidProviderConfiguration,
+    /// Workspace trust or virtual-filesystem policy blocked optional access.
+    WorkspaceBlocked,
     /// Mode was not `off`, `live`, or `snapshot`.
     InvalidMode,
     /// Period contained unsupported characters or exceeded its bound.
@@ -56,7 +62,9 @@ pub enum RuntimeIssue {
     MissingSnapshotPath,
     /// Aggregate JSON exceeded the fixed input bound.
     SnapshotTooLarge,
-    /// Runtime executable could not be started.
+    /// Runtime executable does not exist.
+    NotFound,
+    /// Runtime executable could not be started for another safe-classified reason.
     Unavailable,
     /// Runtime command exceeded its time bound.
     Timeout,
@@ -71,10 +79,14 @@ pub enum RuntimeIssue {
 impl RuntimeIssue {
     pub(crate) const fn message(self) -> &'static str {
         match self {
+            Self::InvalidProvider => "invalid optional provider selection",
+            Self::InvalidProviderConfiguration => "invalid provider initialization options",
+            Self::WorkspaceBlocked => "workspace policy blocks optional runtime access",
             Self::InvalidMode => "invalid runtime mode",
             Self::InvalidPeriod => "invalid CodeBurn period",
             Self::MissingSnapshotPath => "snapshot mode requires a snapshot path",
             Self::SnapshotTooLarge => "runtime JSON exceeds the 10 MiB safety bound",
+            Self::NotFound => "runtime executable is unavailable",
             Self::Unavailable => "runtime source is unavailable",
             Self::Timeout => "runtime source timed out",
             Self::CommandFailed => "runtime source command failed",
@@ -242,7 +254,7 @@ async fn capture(executable: &str, period: &str) -> Result<CodeBurnSnapshot, Run
 async fn read_snapshot(path: &Path) -> Result<CodeBurnSnapshot, RuntimeIssue> {
     let metadata = tokio::fs::metadata(path)
         .await
-        .map_err(|_| RuntimeIssue::ReadFailed)?;
+        .map_err(classify_read_error)?;
     if metadata.len() > MAX_JSON_BYTES as u64 {
         return Err(RuntimeIssue::SnapshotTooLarge);
     }
@@ -251,9 +263,17 @@ async fn read_snapshot(path: &Path) -> Result<CodeBurnSnapshot, RuntimeIssue> {
     }
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(|_| RuntimeIssue::ReadFailed)?;
+        .map_err(classify_read_error)?;
     let value = read_bounded(file).await?;
     CodeBurnSnapshot::parse(&value).map_err(|_| RuntimeIssue::InvalidData)
+}
+
+fn classify_read_error(error: std::io::Error) -> RuntimeIssue {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        RuntimeIssue::NotFound
+    } else {
+        RuntimeIssue::ReadFailed
+    }
 }
 
 async fn read_bounded(reader: impl AsyncRead + Unpin) -> Result<String, RuntimeIssue> {
@@ -277,7 +297,13 @@ async fn run_json(executable: &str, arguments: &[&str]) -> Result<String, Runtim
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| RuntimeIssue::Unavailable)?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RuntimeIssue::NotFound
+            } else {
+                RuntimeIssue::Unavailable
+            }
+        })?;
     let stdout = child.stdout.take().ok_or(RuntimeIssue::Unavailable)?;
     tokio::time::timeout(Duration::from_secs(120), async {
         let value = read_bounded(stdout).await?;
@@ -407,5 +433,13 @@ mod tests {
         assert_eq!(load(&config).await, Err(RuntimeIssue::SnapshotTooLarge));
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_snapshot_uses_safe_not_found_class() {
+        let path = snapshot_path("missing");
+        let config = RuntimeConfig::parse(Some("snapshot"), None, None, path.to_str());
+
+        assert_eq!(load(&config).await, Err(RuntimeIssue::NotFound));
     }
 }

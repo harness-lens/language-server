@@ -3,8 +3,13 @@
 
 #![doc = include_str!("../README.md")]
 
+mod provider_protocol;
 mod runtime_metrics;
 
+pub use provider_protocol::{
+    ProviderAggregateParams, ProviderAggregateResponse, ProviderCatalogParams,
+    ProviderCatalogResponse,
+};
 pub use runtime_metrics::{RuntimeIssue, RuntimeMode, RuntimeState, RuntimeStatus};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,6 +71,10 @@ struct State {
     open_documents: BTreeMap<PathBuf, OpenDocument>,
     runtime_snapshot: Option<CodeBurnSnapshot>,
     runtime_status: runtime_metrics::RuntimeStatus,
+    native_generation: u64,
+    runtime_generation: u64,
+    runtime_last_success: Option<u64>,
+    provider_host: provider_protocol::ProviderHostConfig,
 }
 
 #[derive(Clone)]
@@ -85,10 +94,13 @@ impl Backend {
     fn new(client: Client) -> Self {
         let runtime_config = runtime_metrics::RuntimeConfig::from_env();
         let runtime_status = runtime_config.initial_status();
+        let provider_host =
+            provider_protocol::ProviderHostConfig::from_initialization(None, runtime_config.mode);
         Self {
             client,
             state: RwLock::new(State {
                 runtime_status,
+                provider_host,
                 ..State::default()
             }),
             runtime_config,
@@ -99,10 +111,40 @@ impl Backend {
         if self.runtime_config.mode == runtime_metrics::RuntimeMode::Off {
             return;
         }
-        if let Some(issue) = self.runtime_config.issue {
+        let (selected, blocker) = {
+            let state = self.state.read().await;
+            (
+                state
+                    .provider_host
+                    .selected
+                    .contains(harness_lens::providers::CODEBURN_ID),
+                state.provider_host.runtime_blocker(),
+            )
+        };
+        if !selected && blocker.is_none() {
+            return;
+        }
+        let generation = {
             let mut state = self.state.write().await;
+            state.runtime_generation = state.runtime_generation.saturating_add(1);
+            state.runtime_generation
+        };
+        if let Some(issue) = blocker {
+            let mut state = self.state.write().await;
+            state.runtime_snapshot = None;
+            state.runtime_last_success = None;
             state.runtime_status.state = runtime_metrics::RuntimeState::Invalid;
             state.runtime_status.issue = Some(issue);
+            state.runtime_status.has_snapshot = false;
+            return;
+        }
+        if let Some(issue) = self.runtime_config.issue {
+            let mut state = self.state.write().await;
+            state.runtime_snapshot = None;
+            state.runtime_last_success = None;
+            state.runtime_status.state = runtime_metrics::RuntimeState::Invalid;
+            state.runtime_status.issue = Some(issue);
+            state.runtime_status.has_snapshot = false;
             return;
         }
         {
@@ -125,6 +167,7 @@ impl Backend {
                 let mut state = self.state.write().await;
                 state.runtime_snapshot = Some(snapshot);
                 state.runtime_status = status;
+                state.runtime_last_success = Some(generation);
                 drop(state);
                 self.client
                     .log_message(
@@ -310,6 +353,78 @@ impl Backend {
         .map_err(Error::invalid_params)
     }
 
+    async fn provider_catalog(&self, _: ProviderCatalogParams) -> Result<ProviderCatalogResponse> {
+        let (host, runtime_status, generation, last_success) = {
+            let state = self.state.read().await;
+            (
+                state.provider_host.clone(),
+                state.runtime_status.clone(),
+                state.runtime_generation,
+                state.runtime_last_success,
+            )
+        };
+        let runtime_config = self.runtime_config.clone();
+        tokio::task::spawn_blocking(move || {
+            provider_protocol::build_catalog(
+                &host,
+                &runtime_config,
+                &runtime_status,
+                generation,
+                last_success,
+            )
+        })
+        .await
+        .map_err(|_| Error::internal_error())?
+        .map_err(|_| Error::internal_error())
+    }
+
+    async fn provider_aggregate(
+        &self,
+        params: ProviderAggregateParams,
+    ) -> Result<ProviderAggregateResponse> {
+        let root_uri = params.root_uri.clone();
+        let mut reports = self
+            .workspace_report(WorkspaceReportParams {
+                root_uri: Some(params.root_uri),
+                max_files: params.max_files,
+            })
+            .await?;
+        let native = reports
+            .reports
+            .pop()
+            .ok_or_else(|| Error::invalid_params("rootUri produced no workspace report"))?;
+        let (snapshot, runtime_status, host, native_generation, runtime_generation, last_success) = {
+            let mut state = self.state.write().await;
+            state.native_generation = state.native_generation.saturating_add(1);
+            (
+                state.runtime_snapshot.clone(),
+                state.runtime_status.clone(),
+                state.provider_host.clone(),
+                state.native_generation,
+                state.runtime_generation,
+                state.runtime_last_success,
+            )
+        };
+        let (native, aggregate) = provider_protocol::build_aggregate(
+            native,
+            snapshot.as_ref(),
+            &runtime_status,
+            &host,
+            native_generation,
+            runtime_generation,
+            last_success,
+        )
+        .map_err(|_| Error::internal_error())?;
+        Ok(ProviderAggregateResponse {
+            schema_version: 1,
+            root_uri,
+            native,
+            aggregate,
+            runtime: runtime_status,
+            issue: host.issue,
+        })
+    }
+
     async fn metrics_document(
         &self,
         uri: &Uri,
@@ -327,6 +442,10 @@ impl Backend {
 
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let provider_host = provider_protocol::ProviderHostConfig::from_initialization(
+            params.initialization_options.as_ref(),
+            self.runtime_config.mode,
+        );
         let mut roots = params
             .workspace_folders
             .as_deref()
@@ -353,7 +472,10 @@ impl LanguageServer for Backend {
         }
         roots.sort();
         roots.dedup();
-        self.state.write().await.roots = roots;
+        let mut state = self.state.write().await;
+        state.roots = roots;
+        state.provider_host = provider_host;
+        drop(state);
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -510,6 +632,11 @@ pub async fn serve() {
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::build(Backend::new)
         .custom_method(WORKSPACE_REPORT_METHOD, Backend::workspace_report)
+        .custom_method(provider_protocol::CATALOG_METHOD, Backend::provider_catalog)
+        .custom_method(
+            provider_protocol::AGGREGATE_METHOD,
+            Backend::provider_aggregate,
+        )
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

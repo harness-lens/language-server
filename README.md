@@ -27,6 +27,14 @@ canonical aggregate snapshot without process launch. Live mode accepts
 (default `30days`). Failures expose stable classes only, retain a previous valid
 snapshot, and never persist raw stderr.
 
+Optional live access also requires trusted, non-virtual workspace policy.
+Clients should send `initializationOptions.harnessLens.workspaceTrusted` and
+`virtualWorkspace`; non-editor clients may use
+`HARNESS_LENS_WORKSPACE_TRUSTED=true`. `harnessLens/providerCatalog` exposes
+compiled-in provider status. `harnessLens/providerAggregate` returns a bounded
+Native report beside namespaced provider measurements without changing Native
+scores or serializing source content.
+
 Bootstrap order: publish `@harness-lens/core@0.0.1` before this package.
 
 ## Ecosystem
