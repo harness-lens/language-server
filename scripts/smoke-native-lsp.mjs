@@ -90,10 +90,13 @@ try {
   console.log("HL032 warning: line 2, related line 1, normalization evidence present");
   send({ id: 2, method: "harnessLens/workspaceReport", params: {
     rootUri: pathToFileURL(root).href,
+    maxFiles: 5000,
   } });
   const workspaceReport = await receive(message => message.id === 2);
   assert.equal(workspaceReport.result.schemaVersion, 1);
   assert.equal(workspaceReport.result.reports.length, 1);
+  assert.equal(workspaceReport.result.runtime.mode, "off");
+  assert.equal(workspaceReport.result.runtime.state, "off");
   const report = workspaceReport.result.reports[0];
   assert.ok(report.sources.some(source => source.path === "AGENTS.md"));
   assert.ok(report.metrics.some(metric =>

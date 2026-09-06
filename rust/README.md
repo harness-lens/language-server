@@ -21,10 +21,15 @@ Editor-neutral Language Server Protocol adapter for Harness Lens. It scans the
 workspace with the Rust SDK, overlays unsaved open documents, and publishes
 standard diagnostics with stable Harness Lens rule codes.
 
+Runtime evidence is consent-controlled and defaults to `off`. `live` consumes
+bounded CodeBurn aggregate JSON through Harness Metrics; `snapshot` reads a
+canonical aggregate snapshot and launches no process. Runtime evidence never
+changes deterministic findings or scores.
+
 Clients may request `harnessLens/workspaceReport` for the same content-safe
 analysis report. Per-file source sizes, token estimates, configured cost,
 findings, and provenance remain available without moving analysis into editor
-code.
+code. Requests default to a 5,000-file bound and reject values above 50,000.
 
 Run over standard input/output:
 

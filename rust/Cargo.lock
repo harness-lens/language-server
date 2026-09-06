@@ -53,6 +53,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "fluent-uri"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -142,7 +152,7 @@ dependencies = [
 [[package]]
 name = "harness-lens"
 version = "0.0.1"
-source = "git+https://github.com/harness-lens/sdk.git?rev=6d927ee1e0fc50a47c47a91f3c007f976f0e49ff#6d927ee1e0fc50a47c47a91f3c007f976f0e49ff"
+source = "git+https://github.com/harness-lens/sdk.git?rev=bca5b7fd11c55d846bd943a5ea43736e9c10985a#bca5b7fd11c55d846bd943a5ea43736e9c10985a"
 dependencies = [
  "harness-lens-config",
  "harness-lens-core",
@@ -151,7 +161,7 @@ dependencies = [
 [[package]]
 name = "harness-lens-config"
 version = "0.0.1"
-source = "git+https://github.com/harness-lens/sdk.git?rev=6d927ee1e0fc50a47c47a91f3c007f976f0e49ff#6d927ee1e0fc50a47c47a91f3c007f976f0e49ff"
+source = "git+https://github.com/harness-lens/sdk.git?rev=bca5b7fd11c55d846bd943a5ea43736e9c10985a#bca5b7fd11c55d846bd943a5ea43736e9c10985a"
 dependencies = [
  "harness-lens-core",
  "toml 1.1.5+spec-1.1.0",
@@ -160,7 +170,7 @@ dependencies = [
 [[package]]
 name = "harness-lens-core"
 version = "0.0.1"
-source = "git+https://github.com/harness-lens/core.git?rev=4b8f248b33e6110e581388703046160de56f82f9#4b8f248b33e6110e581388703046160de56f82f9"
+source = "git+https://github.com/harness-lens/core.git?rev=eea55ea7049082cd31bb62d02f29642cebf2ffd6#eea55ea7049082cd31bb62d02f29642cebf2ffd6"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -172,10 +182,21 @@ name = "harness-lens-lsp"
 version = "0.0.1"
 dependencies = [
  "harness-lens",
+ "harness-metrics",
  "serde",
  "serde_json",
  "tokio",
  "tower-lsp-server",
+]
+
+[[package]]
+name = "harness-metrics"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "837d20a9b6d1c46097bd058c7bc714edfce58cbc0e3043218e64ac4eb2343f66"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -245,6 +266,17 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mio"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys",
+]
 
 [[package]]
 name = "once_cell"
@@ -402,6 +434,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -447,8 +489,13 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "tokio-macros",
+ "windows-sys",
 ]
 
 [[package]]
@@ -629,10 +676,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "winnow"

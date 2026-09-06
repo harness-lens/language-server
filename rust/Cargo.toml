@@ -16,9 +16,10 @@ keywords = ["harness", "lsp", "diagnostics", "agents"]
 publish = true
 
 [dependencies]
-harness-lens = { version = "0.0.1", git = "https://github.com/harness-lens/sdk.git", rev = "6d927ee1e0fc50a47c47a91f3c007f976f0e49ff" }
+harness-lens = { version = "0.0.1", git = "https://github.com/harness-lens/sdk.git", rev = "bca5b7fd11c55d846bd943a5ea43736e9c10985a" }
+harness-metrics = "0.0.4"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.47.1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tower-lsp-server = "0.23.0"
 
 [dev-dependencies]
