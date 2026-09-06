@@ -69,6 +69,7 @@ pub struct WorkspaceReports {
 struct State {
     roots: Vec<PathBuf>,
     open_documents: BTreeMap<PathBuf, OpenDocument>,
+    closed_diagnostics: BTreeMap<PathBuf, Uri>,
     runtime_snapshot: Option<CodeBurnSnapshot>,
     runtime_status: runtime_metrics::RuntimeStatus,
     native_generation: u64,
@@ -194,15 +195,18 @@ impl Backend {
     }
 
     async fn analyze_open_documents(&self) {
-        let (roots, documents, runtime_snapshot) = {
+        let (roots, documents, runtime_snapshot, previous_closed) = {
             let state = self.state.read().await;
             (
                 state.roots.clone(),
                 state.open_documents.clone(),
                 state.runtime_snapshot.clone(),
+                state.closed_diagnostics.clone(),
             )
         };
         let mut published = BTreeSet::new();
+        let mut analyzed_roots = BTreeSet::new();
+        let mut next_closed = BTreeMap::new();
 
         for root in &roots {
             let documents_for_root = documents
@@ -233,6 +237,7 @@ impl Backend {
                         continue;
                     }
                 };
+            analyzed_roots.insert(root.clone());
             if !report.completeness.complete {
                 let reason_codes = report
                     .completeness
@@ -279,7 +284,58 @@ impl Backend {
                     .await;
                 published.insert(path.clone());
             }
+
+            let mut closed_findings = BTreeMap::<&Path, Vec<&Finding>>::new();
+            for finding in &report.findings {
+                if finding.severity == Severity::Pass {
+                    continue;
+                }
+                if let Some(relative) = finding.path.as_deref() {
+                    closed_findings.entry(relative).or_default().push(finding);
+                }
+            }
+            for (relative, findings) in closed_findings {
+                let candidate = root.join(relative);
+                let Ok(path) = candidate.canonicalize() else {
+                    continue;
+                };
+                if !path.starts_with(root) || documents_for_root.contains_key(&path) {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Some(uri) = file_uri(&path) else {
+                    continue;
+                };
+                let diagnostics = findings
+                    .into_iter()
+                    .filter_map(|finding| {
+                        let mut diagnostic = diagnostic_from_finding(finding, &content)?;
+                        diagnostic.related_information =
+                            related_information(finding, root, &documents_for_root);
+                        Some(diagnostic)
+                    })
+                    .collect();
+                self.client
+                    .publish_diagnostics(uri.clone(), diagnostics, None)
+                    .await;
+                next_closed.insert(path.clone(), uri);
+                published.insert(path);
+            }
         }
+
+        for (path, uri) in previous_closed {
+            if documents.contains_key(&path) || next_closed.contains_key(&path) {
+                continue;
+            }
+            if analyzed_roots.iter().any(|root| path.starts_with(root)) {
+                self.client.publish_diagnostics(uri, Vec::new(), None).await;
+            } else {
+                next_closed.insert(path, uri);
+            }
+        }
+        self.state.write().await.closed_diagnostics = next_closed;
 
         for (path, document) in documents {
             if published.contains(&path) {
