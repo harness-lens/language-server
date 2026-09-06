@@ -19,7 +19,9 @@ updated binary using `harnessLens.languageServer.path`; installing under
 
 Editor-neutral Language Server Protocol adapter for Harness Lens. It scans the
 workspace with the Rust SDK, overlays unsaved open documents, and publishes
-standard diagnostics with stable Harness Lens rule codes.
+standard diagnostics with stable Harness Lens rule codes. Findings discovered
+in closed harness files are also published, so editor highlights and the
+workspace report stay consistent when a user opens the reported location.
 
 Runtime evidence is consent-controlled and defaults to `off`. `live` consumes
 bounded CodeBurn aggregate JSON through Harness Metrics; `snapshot` reads a

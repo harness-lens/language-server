@@ -13,7 +13,8 @@ npx @harness-lens/language-server --stdio
 
 The Rust server discovers the workspace hierarchy, overlays unsaved open harness
 documents, evaluates cross-file findings, and publishes evidence-backed warnings
-and errors with stable `HLxxx` codes and precise UTF-16 ranges. Optional CodeBurn
+and errors for open and closed harness files with stable `HLxxx` codes and
+precise UTF-16 ranges. Optional CodeBurn
 aggregates add `HMxxx` diagnostics, hover, and code lenses through Harness
 Metrics. Standard clients render these without a private editor protocol.
 

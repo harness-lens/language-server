@@ -13,9 +13,11 @@ import { once } from "node:events";
 assert.ok(process.argv[2], "Pass the native server executable path");
 const root = await mkdtemp(path.join(tmpdir(), "hl032-lsp-"));
 const file = path.join(root, "AGENTS.md");
+const closedFile = path.join(root, "CLAUDE.md");
 const line = "adoption, rejection, assumptions, and source links.";
 const text = `${line}\n${line}\n`;
 await writeFile(file, text);
+await writeFile(closedFile, "Use use tests.\n");
 const child = spawn(path.resolve(process.argv[2]), [], {
   env: {
     ...process.env,
@@ -71,7 +73,9 @@ function send(message) {
 
 try {
   const uri = pathToFileURL(file).href;
+  const closedUri = pathToFileURL(closedFile).href;
   const diagnosticMessage = message => message.method === "textDocument/publishDiagnostics" && message.params.uri === uri;
+  const closedDiagnosticMessage = message => message.method === "textDocument/publishDiagnostics" && message.params.uri === closedUri;
   send({ id: 1, method: "initialize", params: {
     processId: process.pid, capabilities: {},
     workspaceFolders: [{ uri: pathToFileURL(root).href, name: "duplicate-test" }],
@@ -95,6 +99,11 @@ try {
   );
   assert.equal(warning.relatedInformation[0].location.range.start.line, 0);
   console.log("HL032 warning: line 2, related line 1, normalization evidence present");
+  const closedPublished = await receive(closedDiagnosticMessage);
+  const closedWarning = closedPublished.params.diagnostics.find(diagnostic => diagnostic.code === "HL010");
+  assert.ok(closedWarning, `No closed-file HL010 warning: ${JSON.stringify(closedPublished)}`);
+  assert.equal(closedWarning.range.start.line, 0);
+  console.log("Closed-file warning: workspace finding published before the file is opened");
   send({ id: 2, method: "harnessLens/workspaceReport", params: {
     rootUri: pathToFileURL(root).href,
     maxFiles: 5000,
@@ -137,12 +146,16 @@ try {
   assert.ok(!providerAggregate.result.aggregate.reports.codeburn);
   assert.ok(!JSON.stringify(providerAggregate.result).includes(line));
   console.log("Provider aggregate: Native namespaced, source content absent");
+  await writeFile(closedFile, "Use tests.\n");
   send({ method: "textDocument/didChange", params: {
     textDocument: { uri, version: 2 }, contentChanges: [{ text: `${line}\n` }],
   } });
   const cleared = await receive(diagnosticMessage);
   assert.ok(!cleared.params.diagnostics.some(diagnostic => diagnostic.code === "HL032"));
   console.log("HL032 cleared after removing the duplicate in the unsaved editor buffer");
+  const closedCleared = await receive(closedDiagnosticMessage);
+  assert.ok(!closedCleared.params.diagnostics.some(diagnostic => diagnostic.code === "HL010"));
+  console.log("Closed-file warning cleared after the next workspace analysis");
   send({ id: 5, method: "shutdown", params: null });
   await receive(message => message.id === 5);
   send({ method: "exit" });
