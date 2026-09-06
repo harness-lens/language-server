@@ -4,6 +4,7 @@
 // Usage: node scripts/smoke-native-lsp.mjs <native-server-executable>
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdtemp, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -73,9 +74,15 @@ function send(message) {
 
 try {
   const uri = pathToFileURL(file).href;
-  const closedUri = pathToFileURL(closedFile).href;
-  const diagnosticMessage = message => message.method === "textDocument/publishDiagnostics" && message.params.uri === uri;
-  const closedDiagnosticMessage = message => message.method === "textDocument/publishDiagnostics" && message.params.uri === closedUri;
+  const canonicalFile = await realpath(file);
+  const canonicalClosedFile = await realpath(closedFile);
+  // Closed files use server-generated URIs. Rust and Node may encode the
+  // Windows drive colon differently, so match file identity instead of URI text.
+  const diagnosticsFor = canonicalPath => message =>
+    message.method === "textDocument/publishDiagnostics"
+    && realpathSync.native(fileURLToPath(message.params.uri)) === canonicalPath;
+  const diagnosticMessage = diagnosticsFor(canonicalFile);
+  const closedDiagnosticMessage = diagnosticsFor(canonicalClosedFile);
   send({ id: 1, method: "initialize", params: {
     processId: process.pid, capabilities: {},
     workspaceFolders: [{ uri: pathToFileURL(root).href, name: "duplicate-test" }],
