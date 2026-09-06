@@ -31,6 +31,13 @@ analysis report. Per-file source sizes, token estimates, configured cost,
 findings, and provenance remain available without moving analysis into editor
 code. Requests default to a 5,000-file bound and reject values above 50,000.
 
+`harnessLens/providerCatalog` exposes compiled-in Native and optional CodeBurn
+status. `harnessLens/providerAggregate` returns one bounded Native report beside
+namespaced raw provider measurements, method, sample size, assumptions,
+provenance, and refresh health. Optional failure cannot alter Native findings or
+scores. Live provider access requires explicit trusted, non-virtual workspace
+policy; off and snapshot catalog paths launch no process.
+
 Run over standard input/output:
 
 ```bash

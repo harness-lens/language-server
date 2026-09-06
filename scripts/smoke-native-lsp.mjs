@@ -16,7 +16,14 @@ const file = path.join(root, "AGENTS.md");
 const line = "adoption, rejection, assumptions, and source links.";
 const text = `${line}\n${line}\n`;
 await writeFile(file, text);
-const child = spawn(path.resolve(process.argv[2]), [], { stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn(path.resolve(process.argv[2]), [], {
+  env: {
+    ...process.env,
+    HARNESS_LENS_WORKSPACE_TRUSTED: "false",
+    HARNESS_METRICS_MODE: "off",
+  },
+  stdio: ["pipe", "pipe", "pipe"],
+});
 let stderr = "";
 child.stderr.on("data", data => { stderr += data; });
 let buffer = Buffer.alloc(0);
@@ -103,14 +110,41 @@ try {
     metric.path === "AGENTS.md" && metric.name === "harness.source.estimated_tokens"));
   assert.ok(!JSON.stringify(workspaceReport.result).includes(line));
   console.log("Workspace report: per-file metrics present, source content absent");
+  send({ id: 3, method: "harnessLens/providerCatalog", params: {} });
+  const providerCatalog = await receive(message => message.id === 3);
+  assert.equal(providerCatalog.result.schemaVersion, 1);
+  const nativeProvider = providerCatalog.result.providers.find(
+    provider => provider.descriptor.id === "harness-lens-native",
+  );
+  const codeburnProvider = providerCatalog.result.providers.find(
+    provider => provider.descriptor.id === "codeburn",
+  );
+  assert.equal(nativeProvider.selected, true);
+  assert.equal(nativeProvider.availability, "available");
+  assert.equal(nativeProvider.installation, "built_in");
+  assert.equal(codeburnProvider.selected, false);
+  assert.equal(codeburnProvider.availability, "off");
+  console.log("Provider catalog: Native available, optional provider off");
+  send({ id: 4, method: "harnessLens/providerAggregate", params: {
+    rootUri: pathToFileURL(root).href,
+    maxFiles: 5000,
+  } });
+  const providerAggregate = await receive(message => message.id === 4);
+  assert.equal(providerAggregate.result.schemaVersion, 1);
+  assert.equal(providerAggregate.result.runtime.mode, "off");
+  assert.deepEqual(providerAggregate.result.aggregate.selected_providers, ["harness-lens-native"]);
+  assert.ok(providerAggregate.result.aggregate.reports["harness-lens-native"]);
+  assert.ok(!providerAggregate.result.aggregate.reports.codeburn);
+  assert.ok(!JSON.stringify(providerAggregate.result).includes(line));
+  console.log("Provider aggregate: Native namespaced, source content absent");
   send({ method: "textDocument/didChange", params: {
     textDocument: { uri, version: 2 }, contentChanges: [{ text: `${line}\n` }],
   } });
   const cleared = await receive(diagnosticMessage);
   assert.ok(!cleared.params.diagnostics.some(diagnostic => diagnostic.code === "HL032"));
   console.log("HL032 cleared after removing the duplicate in the unsaved editor buffer");
-  send({ id: 3, method: "shutdown", params: null });
-  await receive(message => message.id === 3);
+  send({ id: 5, method: "shutdown", params: null });
+  await receive(message => message.id === 5);
   send({ method: "exit" });
 } finally {
   if (child.exitCode === null && child.pid) {

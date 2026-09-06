@@ -16,14 +16,12 @@ keywords = ["harness", "lsp", "diagnostics", "agents"]
 publish = true
 
 [dependencies]
-harness-lens = { version = "0.0.1", git = "https://github.com/harness-lens/sdk.git", rev = "9dc39f3ad9d5837be4f69ba4553d39bee4630225" }
+harness-lens = { version = "0.0.1", git = "https://github.com/harness-lens/sdk.git", rev = "4a6512b0834f6c8cfce5205bca7e8722139a06fd" }
 harness-metrics = "0.0.4"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tower-lsp-server = "0.23.0"
-
-[dev-dependencies]
-serde_json = "1.0"
 
 [lints.rust]
 missing_docs = "warn"
