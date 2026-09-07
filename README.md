@@ -1,6 +1,8 @@
 > SPDX-License-Identifier: MPL-2.0
 > Copyright © 2026 Cristian Camargo Filho
 
+![Harness Lens](assets/harness-lens-banner.png)
+
 # @harness-lens/language-server
 
 Language Server Protocol adapter for Harness Lens findings. The native server in
