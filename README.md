@@ -38,6 +38,12 @@ compiled-in provider status. `harnessLens/providerAggregate` returns a bounded
 Native report beside namespaced provider measurements without changing Native
 scores or serializing source content.
 
+In trusted, non-virtual `snapshot` mode,
+`HARNESS_LENS_TRACE_SNAPSHOT_PATH` may point to deny-by-default sanitized action
+trace JSON. `harnessLens/observedFlow` derives a bounded, provider-neutral graph
+from originally adjacent observations. Missing evidence stays explicit; the
+response never contains source text, prompts, transcripts, or credentials.
+
 Bootstrap order: publish `@harness-lens/core@0.0.1` before this package.
 
 ## Ecosystem

@@ -153,6 +153,21 @@ try {
   assert.ok(!providerAggregate.result.aggregate.reports.codeburn);
   assert.ok(!JSON.stringify(providerAggregate.result).includes(line));
   console.log("Provider aggregate: Native namespaced, source content absent");
+  send({ id: 5, method: "harnessLens/observedFlow", params: {
+    rootUri: pathToFileURL(root).href,
+    maxNodes: 64,
+    maxEdges: 128,
+    metric: "transitions",
+  } });
+  const observedFlow = await receive(message => message.id === 5);
+  assert.equal(observedFlow.result.schemaVersion, 1);
+  assert.equal(observedFlow.result.status.state, "off");
+  assert.equal(observedFlow.result.graph.kind, "observed_flow");
+  assert.equal(observedFlow.result.graph.availability, "unavailable");
+  assert.deepEqual(observedFlow.result.graph.nodes, []);
+  assert.deepEqual(observedFlow.result.graph.edges, []);
+  assert.ok(!JSON.stringify(observedFlow.result).includes(line));
+  console.log("Observed flow: explicit unavailable state, source content absent");
   await writeFile(closedFile, "Use tests.\n");
   send({ method: "textDocument/didChange", params: {
     textDocument: { uri, version: 2 }, contentChanges: [{ text: `${line}\n` }],
@@ -163,8 +178,8 @@ try {
   const closedCleared = await receive(closedDiagnosticMessage);
   assert.ok(!closedCleared.params.diagnostics.some(diagnostic => diagnostic.code === "HL010"));
   console.log("Closed-file warning cleared after the next workspace analysis");
-  send({ id: 5, method: "shutdown", params: null });
-  await receive(message => message.id === 5);
+  send({ id: 6, method: "shutdown", params: null });
+  await receive(message => message.id === 6);
   send({ method: "exit" });
 } finally {
   if (child.exitCode === null && child.pid) {

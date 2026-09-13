@@ -13,6 +13,7 @@ Reference Rust capabilities:
 - bounded `harnessLens/workspaceReport` transport;
 - bounded `harnessLens/providerCatalog` and `harnessLens/providerAggregate`
   transport;
+- bounded `harnessLens/observedFlow` transport for sanitized ordered traces;
 - opt-in CodeBurn aggregate status, hover, code lenses, and `HMxxx` diagnostics.
 
 The TypeScript compatibility server currently provides incremental
@@ -130,6 +131,53 @@ mode, or selection changes clear affected optional state. Payload bounds and
 Core provider/contribution bounds apply before serialization. The response also
 contains safe runtime status and never contains Harness source content or raw
 CodeBurn JSON.
+
+## Observed flow request
+
+`harnessLens/observedFlow` returns one provider-neutral, bounded relationship
+graph for an initialized file workspace:
+
+```json
+{
+  "rootUri": "file:///workspace",
+  "root": "agent.plan",
+  "maxNodes": 256,
+  "maxEdges": 512,
+  "maxHops": 32,
+  "windowStart": "2026-09-01T00:00:00Z",
+  "windowEnd": "2026-09-13T23:59:59Z",
+  "categories": ["tool"],
+  "statuses": ["success"],
+  "minimumShare": 0.01,
+  "metric": "transitions"
+}
+```
+
+`rootUri` is required and must match an initialized root. Limits default to
+256 nodes, 512 edges, and 32 hops; hard maxima are 5,000, 10,000, and 100.
+Category/status lists accept at most 64 values. Both window endpoints are
+required together. Supported width metrics are `transitions`,
+`distinct_sessions`, `duration_micros`, and `cost`; cost also requires a
+non-empty `costUnit`. The adapter recomputes denominators after semantic and
+minimum-share filters, before response truncation. It never creates adjacency
+across a filtered or missing observation.
+
+The versioned response contains safe refresh `status` and a Core-compatible
+`observed_flow` graph. Status distinguishes `off`, `unavailable`, `loading`,
+`ready`, `partial`, `failed`, and policy-invalid evidence. Graph availability
+separately distinguishes unavailable, insufficient, empty, and ready evidence.
+Cycles use layered node IDs while preserving a shared logical action ID.
+Weighted edges declare unit, denominator, share, sample size, and observation
+window. Bounded provenance may contain stable evidence IDs and a workspace file
+location converted from UTF-8 byte spans to LSP UTF-16 positions; source text is
+never serialized.
+
+Snapshot ingestion requires `HARNESS_METRICS_MODE=snapshot`, a trusted,
+non-virtual workspace, and `HARNESS_LENS_TRACE_SNAPSHOT_PATH`. Input is capped
+at 10 MiB and 10,000 accepted observations, rejects unknown fields, and exposes
+only stable failure classes. A failed refresh may retain the last valid trace;
+the returned graph then declares `stale_snapshot`. Live aggregate mode currently
+has no ordered trace adapter and returns `unsupported_mode` explicitly.
 
 ## Runtime evidence
 
