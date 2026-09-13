@@ -44,6 +44,7 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 const DIAGNOSTIC_SOURCE: &str = "harness-lens";
 const METRICS_SOURCE: &str = "harness-metrics";
 const REFRESH_RUNTIME_COMMAND: &str = "harnessMetrics.refreshCodeBurn";
+const REFRESH_FLOW_COMMAND: &str = "harnessLens.refreshObservedFlow";
 const SHOW_INSIGHT_COMMAND: &str = "harnessMetrics.showInsight";
 const WORKSPACE_REPORT_METHOD: &str = "harnessLens/workspaceReport";
 const DEFAULT_MAX_FILES: usize = 5_000;
@@ -687,6 +688,7 @@ impl LanguageServer for Backend {
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         REFRESH_RUNTIME_COMMAND.to_owned(),
+                        REFRESH_FLOW_COMMAND.to_owned(),
                         SHOW_INSIGHT_COMMAND.to_owned(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -812,6 +814,10 @@ impl LanguageServer for Backend {
                 self.refresh_runtime().await;
                 self.refresh_observed_flow().await;
                 self.analyze_open_documents().await;
+                Ok(None)
+            }
+            REFRESH_FLOW_COMMAND => {
+                self.refresh_observed_flow().await;
                 Ok(None)
             }
             SHOW_INSIGHT_COMMAND => Ok(None),

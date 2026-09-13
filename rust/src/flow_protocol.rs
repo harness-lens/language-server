@@ -721,6 +721,118 @@ mod tests {
     }
 
     #[test]
+    fn fixtures_cover_empty_partial_truncated_incompatible_cyclic_and_populated() {
+        let root = temp_root("states");
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        let empty = normalize_trace_json(
+            r#"{"schema_version":1,"window":{"start":"a","end":"z"},"complete":true,"observations":[],"total_observations":0}"#,
+            10,
+        )
+        .unwrap();
+        let empty_response = build_response(
+            root_uri.clone(),
+            &root,
+            &BTreeMap::new(),
+            Some(&empty),
+            ObservedFlowStatus {
+                state: ObservedFlowState::Ready,
+                has_snapshot: true,
+                ..ObservedFlowStatus::default()
+            },
+            &params(root_uri.clone()),
+        )
+        .unwrap();
+        assert_eq!(empty_response.graph.availability, GraphAvailability::Empty);
+
+        let insufficient = normalize_trace_json(
+            r#"{"schema_version":1,"window":{"start":"a","end":"z"},"complete":true,"observations":[{"id":"one","session_id":"s","sequence":1,"action":{"id":"read","label":"Read","category":"tool"},"status":"success"}]}"#,
+            10,
+        )
+        .unwrap();
+        let insufficient_response = build_response(
+            root_uri.clone(),
+            &root,
+            &BTreeMap::new(),
+            Some(&insufficient),
+            ObservedFlowStatus {
+                state: ObservedFlowState::Ready,
+                has_snapshot: true,
+                observations: 1,
+                sessions: 1,
+                ..ObservedFlowStatus::default()
+            },
+            &params(root_uri.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            insufficient_response.graph.availability,
+            GraphAvailability::InsufficientEvidence
+        );
+
+        let cyclic = normalize_trace_json(
+            r#"{"schema_version":1,"window":{"start":"a","end":"z"},"complete":false,"source_issues":["incompatible"],"observations":[{"id":"one","session_id":"s","sequence":1,"action":{"id":"read","label":"Read","category":"tool"},"status":"success"},{"id":"two","session_id":"s","sequence":2,"action":{"id":"write","label":"Write","category":"tool"},"status":"success"},{"id":"three","session_id":"s","sequence":3,"action":{"id":"read","label":"Read","category":"tool"},"status":"success"}]}"#,
+            10,
+        )
+        .unwrap();
+        let partial_status = ObservedFlowStatus {
+            state: ObservedFlowState::Partial,
+            has_snapshot: true,
+            observations: 3,
+            sessions: 1,
+            ..ObservedFlowStatus::default()
+        };
+        let populated = build_response(
+            root_uri.clone(),
+            &root,
+            &BTreeMap::new(),
+            Some(&cyclic),
+            partial_status.clone(),
+            &params(root_uri.clone()),
+        )
+        .unwrap();
+        assert_eq!(populated.graph.availability, GraphAvailability::Ready);
+        assert_eq!(populated.graph.edges.len(), 2);
+        assert_eq!(
+            populated
+                .graph
+                .nodes
+                .iter()
+                .filter(|node| node.logical_id == "read")
+                .count(),
+            2
+        );
+        assert!(
+            populated
+                .graph
+                .completeness
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "source_incompatible")
+        );
+
+        let mut bounded = params(root_uri.clone());
+        bounded.max_edges = Some(1);
+        let truncated = build_response(
+            root_uri,
+            &root,
+            &BTreeMap::new(),
+            Some(&cyclic),
+            partial_status,
+            &bounded,
+        )
+        .unwrap();
+        assert_eq!(truncated.graph.edges.len(), 1);
+        assert!(
+            truncated
+                .graph
+                .completeness
+                .reasons
+                .iter()
+                .any(|reason| reason.code.starts_with("truncated_"))
+        );
+    }
+
+    #[test]
     fn validates_bounds_windows_and_cost_units() {
         let root = temp_root("params");
         let mut request = params(Uri::from_file_path(root).unwrap());

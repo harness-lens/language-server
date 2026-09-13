@@ -178,7 +178,8 @@ at 10 MiB and 10,000 accepted observations, rejects unknown fields, and exposes
 only stable failure classes. A failed refresh may retain the last valid trace;
 the returned graph then declares `stale_snapshot`. Live aggregate mode currently
 has no ordered trace adapter and returns `unsupported_mode` explicitly. The
-trace mode is independent of optional aggregate-provider selection.
+trace mode is independent of optional aggregate-provider selection. Clients may
+request an explicit reload with `harnessLens.refreshObservedFlow`.
 
 ## Runtime evidence
 
