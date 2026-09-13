@@ -41,7 +41,7 @@ scores. Live provider access requires explicit trusted, non-virtual workspace
 policy; off and snapshot catalog paths launch no process.
 
 `harnessLens/observedFlow` projects sanitized ordered action evidence into a
-bounded weighted graph. Snapshot mode reads the local path in
+bounded weighted graph. `HARNESS_LENS_TRACE_MODE=snapshot` reads the local path in
 `HARNESS_LENS_TRACE_SNAPSHOT_PATH`; off and live modes return explicit
 unavailability without inventing graph values. Filters never join actions that
 were not adjacent in the original session. See

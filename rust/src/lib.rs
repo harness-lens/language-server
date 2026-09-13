@@ -108,7 +108,7 @@ impl Backend {
         let runtime_status = runtime_config.initial_status();
         let provider_host =
             provider_protocol::ProviderHostConfig::from_initialization(None, runtime_config.mode);
-        let flow_config = flow_protocol::ObservedFlowConfig::from_env(runtime_config.mode);
+        let flow_config = flow_protocol::ObservedFlowConfig::from_env();
         let flow_status = flow_config.initial_status();
         Self {
             client,

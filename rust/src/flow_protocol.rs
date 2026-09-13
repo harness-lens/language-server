@@ -57,6 +57,8 @@ pub enum ObservedFlowState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedFlowIssue {
+    /// Trace mode was not `off`, `live`, or `snapshot`.
+    InvalidMode,
     /// Snapshot mode has no sanitized trace path.
     MissingSnapshotPath,
     /// Live runtime source exposes aggregates but no ordered trace adapter.
@@ -99,20 +101,39 @@ pub struct ObservedFlowStatus {
 pub(crate) struct ObservedFlowConfig {
     mode: RuntimeMode,
     snapshot_path: Option<PathBuf>,
+    issue: Option<ObservedFlowIssue>,
 }
 
 impl ObservedFlowConfig {
-    pub(crate) fn from_env(mode: RuntimeMode) -> Self {
+    pub(crate) fn from_env() -> Self {
+        let (mode, issue) = match std::env::var("HARNESS_LENS_TRACE_MODE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            None | Some("") | Some("off") => (RuntimeMode::Off, None),
+            Some("live") => (RuntimeMode::Live, None),
+            Some("snapshot") => (RuntimeMode::Snapshot, None),
+            Some(_) => (RuntimeMode::Off, Some(ObservedFlowIssue::InvalidMode)),
+        };
         Self {
             mode,
             snapshot_path: std::env::var("HARNESS_LENS_TRACE_SNAPSHOT_PATH")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
+            issue,
         }
     }
 
     pub(crate) fn initial_status(&self) -> ObservedFlowStatus {
+        if let Some(issue) = self.issue {
+            return ObservedFlowStatus {
+                state: ObservedFlowState::Invalid,
+                issue: Some(issue),
+                ..ObservedFlowStatus::default()
+            };
+        }
         match self.mode {
             RuntimeMode::Off => ObservedFlowStatus::default(),
             RuntimeMode::Live => ObservedFlowStatus {
@@ -133,13 +154,16 @@ impl ObservedFlowConfig {
     }
 
     pub(crate) fn can_load(&self) -> bool {
-        self.mode == RuntimeMode::Snapshot && self.snapshot_path.is_some()
+        self.issue.is_none() && self.mode == RuntimeMode::Snapshot && self.snapshot_path.is_some()
     }
 }
 
 pub(crate) async fn load(
     config: &ObservedFlowConfig,
 ) -> Result<NormalizedTrace, ObservedFlowIssue> {
+    if let Some(issue) = config.issue {
+        return Err(issue);
+    }
     match config.mode {
         RuntimeMode::Off => return Err(ObservedFlowIssue::UnsupportedMode),
         RuntimeMode::Live => return Err(ObservedFlowIssue::UnsupportedMode),
@@ -434,6 +458,7 @@ fn unavailable_graph(
             complete: false,
             reasons: vec![CompletenessReason {
                 code: match issue {
+                    Some(ObservedFlowIssue::InvalidMode) => "invalid_mode",
                     Some(ObservedFlowIssue::WorkspaceBlocked) => "workspace_blocked",
                     Some(ObservedFlowIssue::InvalidData) => "invalid_data",
                     Some(ObservedFlowIssue::SnapshotTooLarge) => "snapshot_too_large",
@@ -607,6 +632,7 @@ mod tests {
         let config = ObservedFlowConfig {
             mode: RuntimeMode::Snapshot,
             snapshot_path: Some(path.clone()),
+            issue: None,
         };
         assert!(load(&config).await.is_ok());
 

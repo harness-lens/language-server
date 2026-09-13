@@ -172,12 +172,13 @@ window. Bounded provenance may contain stable evidence IDs and a workspace file
 location converted from UTF-8 byte spans to LSP UTF-16 positions; source text is
 never serialized.
 
-Snapshot ingestion requires `HARNESS_METRICS_MODE=snapshot`, a trusted,
+Snapshot ingestion requires `HARNESS_LENS_TRACE_MODE=snapshot`, a trusted,
 non-virtual workspace, and `HARNESS_LENS_TRACE_SNAPSHOT_PATH`. Input is capped
 at 10 MiB and 10,000 accepted observations, rejects unknown fields, and exposes
 only stable failure classes. A failed refresh may retain the last valid trace;
 the returned graph then declares `stale_snapshot`. Live aggregate mode currently
-has no ordered trace adapter and returns `unsupported_mode` explicitly.
+has no ordered trace adapter and returns `unsupported_mode` explicitly. The
+trace mode is independent of optional aggregate-provider selection.
 
 ## Runtime evidence
 
