@@ -3,9 +3,15 @@
 
 #![doc = include_str!("../README.md")]
 
+mod flow_protocol;
 mod provider_protocol;
 mod runtime_metrics;
 
+pub use flow_protocol::{
+    ObservedFlowEdge, ObservedFlowGraph, ObservedFlowIssue, ObservedFlowMetric, ObservedFlowNode,
+    ObservedFlowParams, ObservedFlowProvenance, ObservedFlowResponse, ObservedFlowState,
+    ObservedFlowStatus,
+};
 pub use provider_protocol::{
     ProviderAggregateParams, ProviderAggregateResponse, ProviderCatalogParams,
     ProviderCatalogResponse,
@@ -38,6 +44,7 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 const DIAGNOSTIC_SOURCE: &str = "harness-lens";
 const METRICS_SOURCE: &str = "harness-metrics";
 const REFRESH_RUNTIME_COMMAND: &str = "harnessMetrics.refreshCodeBurn";
+const REFRESH_FLOW_COMMAND: &str = "harnessLens.refreshObservedFlow";
 const SHOW_INSIGHT_COMMAND: &str = "harnessMetrics.showInsight";
 const WORKSPACE_REPORT_METHOD: &str = "harnessLens/workspaceReport";
 const DEFAULT_MAX_FILES: usize = 5_000;
@@ -76,6 +83,10 @@ struct State {
     runtime_generation: u64,
     runtime_last_success: Option<u64>,
     provider_host: provider_protocol::ProviderHostConfig,
+    flow_trace: Option<harness_lens::trace::NormalizedTrace>,
+    flow_status: flow_protocol::ObservedFlowStatus,
+    flow_generation: u64,
+    flow_last_success: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -89,6 +100,7 @@ pub struct Backend {
     client: Client,
     state: RwLock<State>,
     runtime_config: runtime_metrics::RuntimeConfig,
+    flow_config: flow_protocol::ObservedFlowConfig,
 }
 
 impl Backend {
@@ -97,14 +109,18 @@ impl Backend {
         let runtime_status = runtime_config.initial_status();
         let provider_host =
             provider_protocol::ProviderHostConfig::from_initialization(None, runtime_config.mode);
+        let flow_config = flow_protocol::ObservedFlowConfig::from_env();
+        let flow_status = flow_config.initial_status();
         Self {
             client,
             state: RwLock::new(State {
                 runtime_status,
                 provider_host,
+                flow_status,
                 ..State::default()
             }),
             runtime_config,
+            flow_config,
         }
     }
 
@@ -188,6 +204,93 @@ impl Backend {
                     .log_message(
                         MessageType::WARNING,
                         format!("Harness Metrics: {}", issue.message()),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn refresh_observed_flow(&self) {
+        if !self.flow_config.can_load() {
+            self.state.write().await.flow_status = self.flow_config.initial_status();
+            return;
+        }
+        let workspace_blocked = {
+            let state = self.state.read().await;
+            !state.provider_host.workspace_trusted || state.provider_host.virtual_workspace
+        };
+        let generation = {
+            let mut state = self.state.write().await;
+            state.flow_generation = state.flow_generation.saturating_add(1);
+            state.flow_generation
+        };
+        if workspace_blocked {
+            let mut state = self.state.write().await;
+            state.flow_trace = None;
+            state.flow_last_success = None;
+            state.flow_status = flow_protocol::ObservedFlowStatus {
+                state: flow_protocol::ObservedFlowState::Invalid,
+                issue: Some(flow_protocol::ObservedFlowIssue::WorkspaceBlocked),
+                generation,
+                ..flow_protocol::ObservedFlowStatus::default()
+            };
+            return;
+        }
+        {
+            let mut state = self.state.write().await;
+            let retained = state.flow_trace.as_ref().map(trace_counts);
+            state.flow_status = flow_protocol::ObservedFlowStatus {
+                state: flow_protocol::ObservedFlowState::Loading,
+                generation,
+                last_success: state.flow_last_success,
+                has_snapshot: retained.is_some(),
+                observations: retained.map_or(0, |counts| counts.0),
+                sessions: retained.map_or(0, |counts| counts.1),
+                ..flow_protocol::ObservedFlowStatus::default()
+            };
+        }
+        match flow_protocol::load(&self.flow_config).await {
+            Ok(trace) => {
+                let (observations, sessions) = trace_counts(&trace);
+                let state_value = if trace.trace.completeness.complete {
+                    flow_protocol::ObservedFlowState::Ready
+                } else {
+                    flow_protocol::ObservedFlowState::Partial
+                };
+                let mut state = self.state.write().await;
+                state.flow_trace = Some(trace);
+                state.flow_last_success = Some(generation);
+                state.flow_status = flow_protocol::ObservedFlowStatus {
+                    state: state_value,
+                    issue: None,
+                    generation,
+                    last_success: Some(generation),
+                    has_snapshot: true,
+                    observations,
+                    sessions,
+                };
+                drop(state);
+                self.client
+                    .log_message(MessageType::INFO, "Harness Lens observed flow refreshed")
+                    .await;
+            }
+            Err(issue) => {
+                let mut state = self.state.write().await;
+                let retained = state.flow_trace.as_ref().map(trace_counts);
+                state.flow_status = flow_protocol::ObservedFlowStatus {
+                    state: flow_protocol::ObservedFlowState::Failed,
+                    issue: Some(issue),
+                    generation,
+                    last_success: state.flow_last_success,
+                    has_snapshot: retained.is_some(),
+                    observations: retained.map_or(0, |counts| counts.0),
+                    sessions: retained.map_or(0, |counts| counts.1),
+                };
+                drop(state);
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        "Harness Lens observed flow refresh failed",
                     )
                     .await;
             }
@@ -434,6 +537,45 @@ impl Backend {
         .map_err(|_| Error::internal_error())
     }
 
+    async fn observed_flow(
+        &self,
+        params: flow_protocol::ObservedFlowParams,
+    ) -> Result<flow_protocol::ObservedFlowResponse> {
+        let requested_root = params
+            .root_uri
+            .to_file_path()
+            .map(|path| path.into_owned())
+            .ok_or_else(|| Error::invalid_params("rootUri must be a file URI"))?;
+        let requested_root = requested_root.canonicalize().unwrap_or(requested_root);
+        let (roots, documents, trace, status) = {
+            let state = self.state.read().await;
+            (
+                state.roots.clone(),
+                state
+                    .open_documents
+                    .iter()
+                    .map(|(path, document)| (path.clone(), document.text.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+                state.flow_trace.clone(),
+                state.flow_status.clone(),
+            )
+        };
+        if !roots.iter().any(|root| root == &requested_root) {
+            return Err(Error::invalid_params(
+                "rootUri is not an initialized workspace root",
+            ));
+        }
+        flow_protocol::build_response(
+            params.root_uri.clone(),
+            &requested_root,
+            &documents,
+            trace.as_ref(),
+            status,
+            &params,
+        )
+        .map_err(Error::invalid_params)
+    }
+
     async fn provider_aggregate(
         &self,
         params: ProviderAggregateParams,
@@ -546,6 +688,7 @@ impl LanguageServer for Backend {
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         REFRESH_RUNTIME_COMMAND.to_owned(),
+                        REFRESH_FLOW_COMMAND.to_owned(),
                         SHOW_INSIGHT_COMMAND.to_owned(),
                     ],
                     ..ExecuteCommandOptions::default()
@@ -565,6 +708,7 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "Harness Lens language server ready")
             .await;
         self.refresh_runtime().await;
+        self.refresh_observed_flow().await;
         self.analyze_open_documents().await;
     }
 
@@ -668,7 +812,12 @@ impl LanguageServer for Backend {
         match params.command.as_str() {
             REFRESH_RUNTIME_COMMAND => {
                 self.refresh_runtime().await;
+                self.refresh_observed_flow().await;
                 self.analyze_open_documents().await;
+                Ok(None)
+            }
+            REFRESH_FLOW_COMMAND => {
+                self.refresh_observed_flow().await;
                 Ok(None)
             }
             SHOW_INSIGHT_COMMAND => Ok(None),
@@ -688,6 +837,7 @@ pub async fn serve() {
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::build(Backend::new)
         .custom_method(WORKSPACE_REPORT_METHOD, Backend::workspace_report)
+        .custom_method(flow_protocol::OBSERVED_FLOW_METHOD, Backend::observed_flow)
         .custom_method(provider_protocol::CATALOG_METHOD, Backend::provider_catalog)
         .custom_method(
             provider_protocol::AGGREGATE_METHOD,
@@ -740,6 +890,17 @@ fn build_workspace_reports(
         reports,
         runtime,
     })
+}
+
+fn trace_counts(trace: &harness_lens::trace::NormalizedTrace) -> (usize, usize) {
+    let sessions = trace
+        .trace
+        .observations
+        .iter()
+        .map(|observation| observation.session_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    (trace.trace.observations.len(), sessions)
 }
 
 fn diagnostic_from_finding(finding: &Finding, content: &str) -> Option<Diagnostic> {
@@ -882,7 +1043,7 @@ fn related_information(
     }
 }
 
-fn file_uri(path: &Path) -> Option<Uri> {
+pub(crate) fn file_uri(path: &Path) -> Option<Uri> {
     // canonicalize() returns extended-length paths on Windows, which must not
     // leak into LSP file URIs as encoded "?/" segments.
     #[cfg(windows)]
@@ -901,7 +1062,7 @@ fn file_uri(path: &Path) -> Option<Uri> {
     Uri::from_file_path(path)
 }
 
-fn range_from_byte_span(content: &str, span: TextSpan) -> Option<Range> {
+pub(crate) fn range_from_byte_span(content: &str, span: TextSpan) -> Option<Range> {
     if span.start > span.end
         || span.end > content.len()
         || !content.is_char_boundary(span.start)
@@ -925,7 +1086,7 @@ fn range_from_insight_span(content: &str, span: InsightSpan) -> Option<Range> {
     )
 }
 
-fn whole_line_range(content: &str, one_based_line: usize) -> Range {
+pub(crate) fn whole_line_range(content: &str, one_based_line: usize) -> Range {
     let target = one_based_line.saturating_sub(1);
     let line = content.lines().nth(target).unwrap_or("");
     Range::new(
