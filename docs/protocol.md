@@ -144,6 +144,7 @@ graph for an initialized file workspace:
   "maxNodes": 256,
   "maxEdges": 512,
   "maxHops": 32,
+  "maxTurns": 512,
   "windowStart": "2026-09-01T00:00:00Z",
   "windowEnd": "2026-09-13T23:59:59Z",
   "categories": ["tool"],
@@ -153,8 +154,10 @@ graph for an initialized file workspace:
 }
 ```
 
-`rootUri` is required and must match an initialized root. Limits default to
-256 nodes, 512 edges, and 32 hops; hard maxima are 5,000, 10,000, and 100.
+`rootUri` is required and must match an initialized root. Graph limits default
+to 256 nodes, 512 edges, and 32 hops; hard maxima are 5,000, 10,000, and 100.
+The aligned token timeline defaults to 512 turns and has a hard maximum of
+10,000 turns.
 Category/status lists accept at most 64 values. Both window endpoints are
 required together. Supported width metrics are `transitions`,
 `distinct_sessions`, `duration_micros`, and `cost`; cost also requires a
@@ -163,7 +166,8 @@ minimum-share filters, before response truncation. It never creates adjacency
 across a filtered or missing observation.
 
 The versioned response contains safe refresh `status` and a Core-compatible
-`observed_flow` graph. Status distinguishes `off`, `unavailable`, `loading`,
+`observed_flow` graph plus a `tokenTimeline`. Status distinguishes `off`,
+`unavailable`, `loading`,
 `ready`, `partial`, `failed`, and policy-invalid evidence. Graph availability
 separately distinguishes unavailable, insufficient, empty, and ready evidence.
 Cycles use layered node IDs while preserving a shared logical action ID.
@@ -172,12 +176,20 @@ window. Bounded provenance may contain stable evidence IDs and a workspace file
 location converted from UTF-8 byte spans to LSP UTF-16 positions; source text is
 never serialized.
 
+`tokenTimeline` is a bounded statistical projection over the same selected
+transitions and exposes its sample size. Each canonical turn may carry an
+explicit total plus input, output, and cached-input token components, attributed
+cost, measured/estimated status, and a UTF-16 source location. Missing token
+usage remains an explicit gap and never means zero. `totalTurns` reports the
+pre-bound count while `maxTurns` and `truncated_turns` expose response clipping.
+
 Snapshot ingestion requires `HARNESS_LENS_TRACE_MODE=snapshot`, a trusted,
 non-virtual workspace, and `HARNESS_LENS_TRACE_SNAPSHOT_PATH`. Input is capped
 at 10 MiB and 10,000 accepted observations, rejects unknown fields, and exposes
 only stable failure classes. A failed refresh may retain the last valid trace;
-the returned graph then declares `stale_snapshot`. Live aggregate mode currently
-has no ordered trace adapter and returns `unsupported_mode` explicitly. The
+the returned graph and token timeline then declare `stale_snapshot`. Live
+aggregate mode currently has no ordered trace adapter and returns
+`unsupported_mode` explicitly. The
 trace mode is independent of optional aggregate-provider selection. Clients may
 request an explicit reload with `harnessLens.refreshObservedFlow`.
 

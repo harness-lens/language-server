@@ -10,7 +10,7 @@ mod runtime_metrics;
 pub use flow_protocol::{
     ObservedFlowEdge, ObservedFlowGraph, ObservedFlowIssue, ObservedFlowMetric, ObservedFlowNode,
     ObservedFlowParams, ObservedFlowProvenance, ObservedFlowResponse, ObservedFlowState,
-    ObservedFlowStatus,
+    ObservedFlowStatus, ObservedFlowTokenTimeline, ObservedFlowTokenUsage, ObservedFlowTurn,
 };
 pub use provider_protocol::{
     ProviderAggregateParams, ProviderAggregateResponse, ProviderCatalogParams,

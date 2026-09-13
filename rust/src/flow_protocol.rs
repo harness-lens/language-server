@@ -6,13 +6,16 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use harness_lens::observed_flow::{FlowMetric, ObservedFlowOptions, build_observed_flow};
+use harness_lens::observed_flow::{
+    ABSOLUTE_MAX_FLOW_TURNS, FlowMetric, ObservedFlowOptions,
+    ObservedTokenTimeline as SdkObservedTokenTimeline, build_observed_flow_projection,
+};
 use harness_lens::trace::{NormalizedTrace, normalize_trace_json};
 use harness_lens::{
-    CompletenessReason, EvidenceCompleteness, EvidenceLocation, GraphAvailability, GraphFilters,
-    GraphKind, GraphLimits, GraphNodeKind, GraphRelationship, ObservationWindow,
-    RELATIONSHIP_GRAPH_SCHEMA_VERSION, RelationshipGraph, RuntimeObservationStatus, ScoreMethod,
-    WeightedEdgeMetric,
+    ActionIdentity, CompletenessReason, EvidenceCompleteness, EvidenceLocation, GraphAvailability,
+    GraphFilters, GraphKind, GraphLimits, GraphNodeKind, GraphRelationship, ObservationWindow,
+    ObservedCost, ObservedTokenUsage, RELATIONSHIP_GRAPH_SCHEMA_VERSION, RelationshipGraph,
+    RuntimeObservationStatus, ScoreMethod, WeightedEdgeMetric,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -27,6 +30,7 @@ const DEFAULT_MAX_OBSERVATIONS: usize = 10_000;
 const DEFAULT_MAX_NODES: usize = 256;
 const DEFAULT_MAX_EDGES: usize = 512;
 const DEFAULT_MAX_HOPS: usize = 32;
+const DEFAULT_MAX_TURNS: usize = 512;
 const ABSOLUTE_MAX_NODES: usize = 5_000;
 const ABSOLUTE_MAX_EDGES: usize = 10_000;
 const ABSOLUTE_MAX_HOPS: usize = 100;
@@ -240,6 +244,8 @@ pub struct ObservedFlowParams {
     pub max_edges: Option<usize>,
     /// Maximum directed hops from `root`.
     pub max_hops: Option<usize>,
+    /// Maximum serialized turns in the aligned token timeline.
+    pub max_turns: Option<usize>,
     /// Inclusive timestamp lower bound.
     pub window_start: Option<String>,
     /// Inclusive timestamp upper bound.
@@ -271,6 +277,8 @@ pub struct ObservedFlowResponse {
     pub status: ObservedFlowStatus,
     /// Bounded graph with protocol-native source locations.
     pub graph: ObservedFlowGraph,
+    /// Bounded per-turn token evidence aligned with the graph.
+    pub token_timeline: ObservedFlowTokenTimeline,
 }
 
 /// Core graph envelope with LSP-native provenance locations.
@@ -348,6 +356,77 @@ pub struct ObservedFlowProvenance {
     pub location: Option<Location>,
 }
 
+/// Bounded statistical per-turn evidence for the token lens.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedFlowTokenTimeline {
+    /// Runtime evidence method.
+    pub method: ScoreMethod,
+    /// Whether any returned turn carries token evidence.
+    pub availability: GraphAvailability,
+    /// Missing, stale, and truncated evidence reasons.
+    pub completeness: EvidenceCompleteness,
+    /// Maximum turns serialized in this response.
+    pub max_turns: usize,
+    /// Matching turns before the response bound.
+    pub total_turns: usize,
+    /// Returned turns carrying token evidence.
+    pub sample_size: usize,
+    /// Fixed bar unit.
+    pub unit: String,
+    /// Canonically ordered turns, including explicit token gaps.
+    pub turns: Vec<ObservedFlowTurn>,
+}
+
+/// One safe ordered turn exposed to the editor.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedFlowTurn {
+    /// Stable observation identity.
+    pub id: String,
+    /// Stable session identity.
+    pub session_id: String,
+    /// Source order within the session.
+    pub sequence: u64,
+    /// Layer matching the Sankey projection.
+    pub layer: usize,
+    /// Normalized source timestamp, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    /// Content-safe action identity.
+    pub action: ActionIdentity,
+    /// Sanitized terminal status.
+    pub status: RuntimeObservationStatus,
+    /// Measured or explicitly estimated token usage, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<ObservedFlowTokenUsage>,
+    /// Attributed cost, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ObservedCost>,
+    /// Safe UTF-16 source location, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+}
+
+/// Provider-neutral token counts attributed to one turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedFlowTokenUsage {
+    /// Prompt or input tokens, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Completion or output tokens, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Cached input tokens, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    /// Total tokens attributed to the turn.
+    pub total_tokens: u64,
+    /// Whether any count was estimated by the source.
+    pub estimated: bool,
+}
+
 pub(crate) fn build_response(
     root_uri: Uri,
     root: &Path,
@@ -357,15 +436,19 @@ pub(crate) fn build_response(
     params: &ObservedFlowParams,
 ) -> Result<ObservedFlowResponse, String> {
     let options = options(params)?;
-    let mut graph = match trace {
-        Some(trace) => build_observed_flow(&trace.trace, &options)
-            .map_err(|error| format!("cannot build observed flow: {error}"))?,
+    let max_turns = max_turns(params)?;
+    let (mut graph, mut token_timeline) = match trace {
+        Some(trace) => {
+            let projection = build_observed_flow_projection(&trace.trace, &options, max_turns)
+                .map_err(|error| format!("cannot build observed flow projection: {error}"))?;
+            (projection.graph, projection.token_timeline)
+        }
         None => {
             let graph = unavailable_graph(&options, status.issue);
             graph
                 .validate()
                 .map_err(|error| format!("invalid unavailable observed flow: {error}"))?;
-            graph
+            (graph, unavailable_token_timeline(max_turns, status.issue))
         }
     };
     if status.state == ObservedFlowState::Failed && status.has_snapshot {
@@ -378,13 +461,36 @@ pub(crate) fn build_response(
         graph
             .validate()
             .map_err(|error| format!("invalid retained observed flow: {error}"))?;
+        token_timeline.completeness.complete = false;
+        token_timeline
+            .completeness
+            .reasons
+            .push(CompletenessReason {
+                code: "stale_snapshot".to_owned(),
+                count: None,
+            });
+        token_timeline
+            .completeness
+            .reasons
+            .sort_by(|left, right| left.code.cmp(&right.code));
     }
     Ok(ObservedFlowResponse {
         schema_version: 1,
         root_uri,
         status,
         graph: protocol_graph(root, open_documents, graph),
+        token_timeline: protocol_token_timeline(root, open_documents, token_timeline),
     })
+}
+
+fn max_turns(params: &ObservedFlowParams) -> Result<usize, String> {
+    let max_turns = params.max_turns.unwrap_or(DEFAULT_MAX_TURNS);
+    if max_turns == 0 || max_turns > ABSOLUTE_MAX_FLOW_TURNS {
+        return Err(format!(
+            "maxTurns must be between 1 and {ABSOLUTE_MAX_FLOW_TURNS}"
+        ));
+    }
+    Ok(max_turns)
 }
 
 fn options(params: &ObservedFlowParams) -> Result<ObservedFlowOptions, String> {
@@ -457,18 +563,7 @@ fn unavailable_graph(
         completeness: EvidenceCompleteness {
             complete: false,
             reasons: vec![CompletenessReason {
-                code: match issue {
-                    Some(ObservedFlowIssue::InvalidMode) => "invalid_mode",
-                    Some(ObservedFlowIssue::WorkspaceBlocked) => "workspace_blocked",
-                    Some(ObservedFlowIssue::InvalidData) => "invalid_data",
-                    Some(ObservedFlowIssue::SnapshotTooLarge) => "snapshot_too_large",
-                    Some(ObservedFlowIssue::ReadFailed) => "read_failed",
-                    Some(ObservedFlowIssue::NotFound) => "not_found",
-                    Some(ObservedFlowIssue::MissingSnapshotPath) => "missing_snapshot_path",
-                    Some(ObservedFlowIssue::UnsupportedMode) => "unsupported_mode",
-                    None => "runtime_off",
-                }
-                .to_owned(),
+                code: issue_reason(issue).to_owned(),
                 count: None,
             }],
         },
@@ -489,6 +584,42 @@ fn unavailable_graph(
         edges: Vec::new(),
     }
     .canonicalize()
+}
+
+fn unavailable_token_timeline(
+    max_turns: usize,
+    issue: Option<ObservedFlowIssue>,
+) -> SdkObservedTokenTimeline {
+    SdkObservedTokenTimeline {
+        method: ScoreMethod::Statistical,
+        availability: GraphAvailability::Unavailable,
+        completeness: EvidenceCompleteness {
+            complete: false,
+            reasons: vec![CompletenessReason {
+                code: issue_reason(issue).to_owned(),
+                count: None,
+            }],
+        },
+        max_turns,
+        total_turns: 0,
+        sample_size: 0,
+        unit: "tokens".to_owned(),
+        turns: Vec::new(),
+    }
+}
+
+fn issue_reason(issue: Option<ObservedFlowIssue>) -> &'static str {
+    match issue {
+        Some(ObservedFlowIssue::InvalidMode) => "invalid_mode",
+        Some(ObservedFlowIssue::WorkspaceBlocked) => "workspace_blocked",
+        Some(ObservedFlowIssue::InvalidData) => "invalid_data",
+        Some(ObservedFlowIssue::SnapshotTooLarge) => "snapshot_too_large",
+        Some(ObservedFlowIssue::ReadFailed) => "read_failed",
+        Some(ObservedFlowIssue::NotFound) => "not_found",
+        Some(ObservedFlowIssue::MissingSnapshotPath) => "missing_snapshot_path",
+        Some(ObservedFlowIssue::UnsupportedMode) => "unsupported_mode",
+        None => "runtime_off",
+    }
 }
 
 fn protocol_graph(
@@ -537,6 +668,50 @@ fn protocol_graph(
                     .collect(),
             })
             .collect(),
+    }
+}
+
+fn protocol_token_timeline(
+    root: &Path,
+    open_documents: &BTreeMap<PathBuf, String>,
+    timeline: SdkObservedTokenTimeline,
+) -> ObservedFlowTokenTimeline {
+    ObservedFlowTokenTimeline {
+        method: timeline.method,
+        availability: timeline.availability,
+        completeness: timeline.completeness,
+        max_turns: timeline.max_turns,
+        total_turns: timeline.total_turns,
+        sample_size: timeline.sample_size,
+        unit: timeline.unit,
+        turns: timeline
+            .turns
+            .into_iter()
+            .map(|turn| ObservedFlowTurn {
+                id: turn.id,
+                session_id: turn.session_id,
+                sequence: turn.sequence,
+                layer: turn.layer,
+                observed_at: turn.observed_at,
+                action: turn.action,
+                status: turn.status,
+                token_usage: turn.token_usage.map(protocol_token_usage),
+                cost: turn.cost,
+                location: turn
+                    .location
+                    .and_then(|location| source_location(root, open_documents, &location)),
+            })
+            .collect(),
+    }
+}
+
+fn protocol_token_usage(usage: ObservedTokenUsage) -> ObservedFlowTokenUsage {
+    ObservedFlowTokenUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        total_tokens: usage.total_tokens,
+        estimated: usage.estimated,
     }
 }
 
@@ -609,6 +784,7 @@ mod tests {
             max_nodes: None,
             max_edges: None,
             max_hops: None,
+            max_turns: None,
             window_start: None,
             window_end: None,
             categories: Vec::new(),
@@ -664,6 +840,12 @@ mod tests {
         assert_eq!(response.graph.availability, GraphAvailability::Unavailable);
         assert_eq!(response.graph.filters.metric_unit, "transitions");
         assert_eq!(response.graph.filters.minimum_share, Some(0.1));
+        assert_eq!(
+            response.token_timeline.availability,
+            GraphAvailability::Unavailable
+        );
+        assert_eq!(response.token_timeline.max_turns, DEFAULT_MAX_TURNS);
+        assert_eq!(response.token_timeline.sample_size, 0);
     }
 
     #[test]
@@ -680,10 +862,16 @@ mod tests {
               "observations":[
                 {"id":"one","session_id":"s","sequence":1,
                  "action":{"id":"read","label":"Read","category":"tool"},
-                 "status":"success"},
+                 "status":"success",
+                 "token_usage":{"input_tokens":60,"output_tokens":20,
+                                  "cached_input_tokens":10,"total_tokens":80,
+                                  "estimated":false}},
                 {"id":"two","session_id":"s","sequence":2,
                  "action":{"id":"write","label":"Write","category":"tool"},
                  "status":"success",
+                 "token_usage":{"input_tokens":90,"output_tokens":30,
+                                  "cached_input_tokens":20,"total_tokens":120,
+                                  "estimated":true},
                  "location":{"path":"action.md","span":{"start":4,"end":6}}}
               ]
             }"#,
@@ -717,6 +905,25 @@ mod tests {
             .unwrap();
         assert_eq!(location.range.start.character, 2);
         assert_eq!(location.range.end.character, 4);
+        assert_eq!(response.token_timeline.sample_size, 2);
+        assert_eq!(response.token_timeline.total_turns, 2);
+        assert_eq!(
+            response.token_timeline.turns[1]
+                .token_usage
+                .as_ref()
+                .map(|usage| usage.total_tokens),
+            Some(120)
+        );
+        let turn_location = response.token_timeline.turns[1].location.as_ref().unwrap();
+        assert_eq!(turn_location.range.start.character, 2);
+        assert_eq!(turn_location.range.end.character, 4);
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["tokenTimeline"]["maxTurns"], DEFAULT_MAX_TURNS);
+        assert_eq!(
+            json["tokenTimeline"]["turns"][1]["tokenUsage"]["totalTokens"],
+            120
+        );
+        assert!(json.get("token_timeline").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -839,6 +1046,9 @@ mod tests {
         request.max_nodes = Some(0);
         assert!(options(&request).unwrap_err().contains("maxNodes"));
         request.max_nodes = None;
+        request.max_turns = Some(0);
+        assert!(max_turns(&request).unwrap_err().contains("maxTurns"));
+        request.max_turns = None;
         request.window_start = Some("a".to_owned());
         assert!(options(&request).unwrap_err().contains("supplied together"));
         request.window_start = None;
