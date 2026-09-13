@@ -41,8 +41,10 @@ scores or serializing source content.
 In trusted, non-virtual `HARNESS_LENS_TRACE_MODE=snapshot`,
 `HARNESS_LENS_TRACE_SNAPSHOT_PATH` may point to deny-by-default sanitized action
 trace JSON. `harnessLens/observedFlow` derives a bounded, provider-neutral graph
-from originally adjacent observations. Missing evidence stays explicit; the
-response never contains source text, prompts, transcripts, or credentials.
+from originally adjacent observations and an aligned bounded per-turn token
+timeline for editor visualization. Measured and explicitly estimated counts are
+distinguished; missing token evidence stays explicit rather than becoming zero.
+The response never contains source text, prompts, transcripts, or credentials.
 
 Bootstrap order: publish `@harness-lens/core@0.0.1` before this package.
 

@@ -44,7 +44,10 @@ policy; off and snapshot catalog paths launch no process.
 bounded weighted graph. `HARNESS_LENS_TRACE_MODE=snapshot` reads the local path in
 `HARNESS_LENS_TRACE_SNAPSHOT_PATH`; off and live modes return explicit
 unavailability without inventing graph values. Filters never join actions that
-were not adjacent in the original session. See
+were not adjacent in the original session. The same request returns a bounded
+statistical per-turn token timeline aligned with the selected graph, including
+sample size, explicit token gaps, attributed cost, and safe UTF-16 navigation.
+See
 [`docs/protocol.md`](../docs/protocol.md) for request bounds and status states.
 
 Run over standard input/output:
