@@ -152,7 +152,7 @@ dependencies = [
 [[package]]
 name = "harness-lens"
 version = "0.0.2"
-source = "git+https://github.com/harness-lens/sdk.git?rev=17d3ec727c12322fa2dbe02ed4d2532ef6392b2c#17d3ec727c12322fa2dbe02ed4d2532ef6392b2c"
+source = "git+https://github.com/harness-lens/sdk.git?rev=9af01a3e9480289c6808b583fb632c979748609e#9af01a3e9480289c6808b583fb632c979748609e"
 dependencies = [
  "harness-lens-config",
  "harness-lens-core",
@@ -163,7 +163,7 @@ dependencies = [
 [[package]]
 name = "harness-lens-config"
 version = "0.0.2"
-source = "git+https://github.com/harness-lens/sdk.git?rev=17d3ec727c12322fa2dbe02ed4d2532ef6392b2c#17d3ec727c12322fa2dbe02ed4d2532ef6392b2c"
+source = "git+https://github.com/harness-lens/sdk.git?rev=9af01a3e9480289c6808b583fb632c979748609e#9af01a3e9480289c6808b583fb632c979748609e"
 dependencies = [
  "harness-lens-core",
  "toml 1.1.5+spec-1.1.0",
@@ -172,7 +172,7 @@ dependencies = [
 [[package]]
 name = "harness-lens-core"
 version = "0.0.2"
-source = "git+https://github.com/harness-lens/core.git?rev=a0799c06ed7205522bce8d2b9b0aa04764890994#a0799c06ed7205522bce8d2b9b0aa04764890994"
+source = "git+https://github.com/harness-lens/core.git?rev=1f1d453111f385859d0afe2c8126f2e36cf30938#1f1d453111f385859d0afe2c8126f2e36cf30938"
 dependencies = [
  "serde",
  "serde_json",
